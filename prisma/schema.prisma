@@ -1,0 +1,172 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// Note that some adapters may set a maximum length for the String type by default, please ensure your strings are long
+// enough when changing adapters.
+// See https://www.prisma.io/docs/orm/reference/prisma-schema-reference#string for more information
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Session {
+  id                  String    @id
+  shop                String
+  state               String
+  isOnline            Boolean   @default(false)
+  scope               String?
+  expires             DateTime?
+  accessToken         String
+  userId              BigInt?
+  firstName           String?
+  lastName            String?
+  email               String?
+  accountOwner        Boolean   @default(false)
+  locale              String?
+  collaborator        Boolean?  @default(false)
+  emailVerified       Boolean?  @default(false)
+  refreshToken        String?
+  refreshTokenExpires DateTime?
+  
+  @@index([shop])
+}
+
+// Brand configuration for multi-brand Umami tracking
+model Brand {
+  id                  String        @id @default(uuid())
+  name                String
+  umamiWebsiteUuid    String        // Umami website ID for this brand
+  domains             String        // JSON array of domains
+  defaultCurrency     String        @default("USD")
+  enabled             Boolean       @default(true)
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+  
+  shops               ShopConfig[]
+  
+  @@unique([umamiWebsiteUuid])
+}
+
+// Shop-specific configuration
+model ShopConfig {
+  id                  String        @id @default(uuid())
+  shopifyShop         String        @unique // e.g., example.myshopify.com
+  brandId             String
+  brand               Brand         @relation(fields: [brandId], references: [id], onDelete: Cascade)
+  
+  umamiEndpoint       String        @default("https://umami.seleric.cloud/api/send")
+  dataWebsiteId       String?       // For script tag usage
+  
+  // Tracking controls
+  pixelEnabled        Boolean       @default(true)
+  webhookEnabled      Boolean       @default(true)
+  
+  // Consent settings
+  consentMode         String        @default("relaxed") // "strict" or "relaxed"
+  requireConsent      Boolean       @default(false)
+  
+  // Provider settings (JSON)
+  providerSettings    String?       // JSON: { razorpay: { enabled, webhookSecret }, stripe: {...} }
+  
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+  
+  eventsReceived      EventReceived[]
+  attributions        Attribution[]
+}
+
+// Event deduplication and audit log
+model EventReceived {
+  id                  String        @id @default(uuid())
+  shopConfigId        String
+  shopConfig          ShopConfig    @relation(fields: [shopConfigId], references: [id], onDelete: Cascade)
+  
+  eventKey            String        // shop + order_id + event_type for dedupe
+  eventType           String        // purchase, add_to_cart, etc.
+  eventSource         String        // "pixel", "webhook", "provider"
+  
+  shopifyOrderId      String?
+  shopifyCheckoutId   String?
+  
+  eventName           String
+  eventData           String        // JSON payload
+  
+  processedAt         DateTime      @default(now())
+  forwardedToUmami    Boolean       @default(false)
+  umamiResponse       String?       // JSON response from Umami
+  
+  createdAt           DateTime      @default(now())
+  
+  @@unique([eventKey])
+  @@index([shopConfigId, eventType])
+  @@index([shopifyOrderId])
+  @@index([processedAt])
+}
+
+// Attribution tracking (UTM + first/last touch)
+model Attribution {
+  id                  String        @id @default(uuid())
+  shopConfigId        String
+  shopConfig          ShopConfig    @relation(fields: [shopConfigId], references: [id], onDelete: Cascade)
+  
+  sessionId           String?       // Client session ID
+  customerHash        String?       // SHA256 hashed email
+  orderId             String?       // Shopify order ID
+  
+  // UTM parameters
+  utmSource           String?
+  utmMedium           String?
+  utmCampaign         String?
+  utmTerm             String?
+  utmContent          String?
+  
+  // Attribution metadata
+  firstTouch          Boolean       @default(false)
+  landingPage         String?
+  referrer            String?
+  
+  capturedAt          DateTime      @default(now())
+  
+  @@index([customerHash])
+  @@index([orderId])
+  @@index([sessionId])
+}
+
+// Provider connector configuration (for third-party checkouts)
+model ProviderConnector {
+  id                  String        @id @default(uuid())
+  shopifyShop         String
+  
+  providerName        String        // "razorpay", "stripe", etc.
+  enabled             Boolean       @default(false)
+  
+  webhookSecret       String?
+  apiKey              String?
+  
+  config              String?       // JSON: provider-specific settings
+  
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+  
+  @@unique([shopifyShop, providerName])
+}
+
+// Health monitoring
+model HealthLog {
+  id                  String        @id @default(uuid())
+  shopifyShop         String
+  
+  component           String        // "pixel", "webhook", "umami_forward"
+  status              String        // "success", "error", "warning"
+  message             String
+  details             String?       // JSON
+  
+  timestamp           DateTime      @default(now())
+  
+  @@index([shopifyShop, timestamp])
+  @@index([component, status])
+}

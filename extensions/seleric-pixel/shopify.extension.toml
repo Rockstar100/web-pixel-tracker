@@ -1,0 +1,16 @@
+name = "Seleric-pixel"
+type = "web_pixel_extension"
+uid = "ce7f9021-9dff-1e3e-ee0d-0e249d4b3a03972b8d7f"
+
+runtime_context = "strict"
+
+[settings]
+type = "object"
+
+[settings.fields.accountID]
+name = "Account ID"
+description = "Account ID"
+type = "single_line_text_field"
+validations =  [
+  { name = "min", value = "1" }
+]
