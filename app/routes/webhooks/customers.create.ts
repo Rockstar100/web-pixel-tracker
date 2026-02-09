@@ -1,9 +1,9 @@
 import type { ActionFunctionArgs } from "@react-router/node";
 import { PrismaClient } from "@prisma/client";
-import { EventNormalizer } from "~/services/normalizer";
-import { EventDeduplicator } from "~/services/deduplicator";
-import { UmamiForwarder } from "~/services/umami-forwarder";
-import type { ShopifyWebhookPayload } from "~/services/types";
+import { EventNormalizer } from "../../services/normalizer";
+import { EventDeduplicator } from "../../services/deduplicator";
+import { UmamiForwarder } from "../../services/umami-forwarder";
+import type { ShopifyWebhookPayload, ShopConfigData } from "../../services/types";
 
 const prisma = new PrismaClient();
 
@@ -36,10 +36,11 @@ export async function action({ request }: ActionFunctionArgs) {
       return Response.json({ message: "Webhook tracking disabled" }, { status: 200 });
     }
 
+    const typedShopConfig = shopConfig as ShopConfigData;
     const normalizedEvent = EventNormalizer.normalizeWebhookEvent(
       "customers/create",
       payload,
-      shopConfig as any
+      typedShopConfig
     );
 
     const dedupeResult = await EventDeduplicator.checkAndStore(
@@ -48,7 +49,7 @@ export async function action({ request }: ActionFunctionArgs) {
     );
 
     if (!dedupeResult.isDuplicate) {
-      await UmamiForwarder.forward(normalizedEvent, shopConfig as any);
+      await UmamiForwarder.forward(normalizedEvent, typedShopConfig);
     }
 
     return Response.json({ success: true, eventKey: dedupeResult.eventKey });

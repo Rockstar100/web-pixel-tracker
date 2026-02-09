@@ -82,7 +82,7 @@ export class EventDeduplicator {
    */
   static async markForwarded(
     eventKey: string,
-    umamiResponse: any
+    umamiResponse: unknown
   ): Promise<void> {
     try {
       await prisma.eventReceived.update({
@@ -103,8 +103,7 @@ export class EventDeduplicator {
    */
   static async handlePurchaseConflict(
     pixelEvent: NormalizedEvent,
-    webhookEvent: NormalizedEvent,
-    shopConfigId: string
+    webhookEvent: NormalizedEvent
   ): Promise<'pixel' | 'webhook' | 'both'> {
     // If webhook is already stored, skip pixel
     const webhookKey = EventNormalizer.generateEventKey(

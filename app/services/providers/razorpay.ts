@@ -2,6 +2,33 @@ import type { PaymentProvider } from './base';
 import type { NormalizedEvent } from '../types';
 import crypto from 'crypto';
 
+type RazorpayEntity = {
+  amount?: number;
+  currency?: string;
+  order_id?: string;
+  id?: string;
+  email?: string;
+  customer_details?: {
+    email?: string;
+  };
+  created_at?: number;
+  method?: string;
+  status?: string;
+  notes?: unknown;
+};
+
+type RazorpayPayload = {
+  event?: string;
+  payload?: {
+    payment?: {
+      entity?: RazorpayEntity;
+    };
+    order?: {
+      entity?: RazorpayEntity;
+    };
+  };
+};
+
 /**
  * Razorpay payment provider connector
  * Handles Razorpay Magic Checkout and standard checkout webhooks
@@ -30,12 +57,13 @@ export class RazorpayProvider implements PaymentProvider {
    * Normalize Razorpay webhook to NormalizedEvent
    */
   normalizeWebhook(
-    payload: any,
+    payload: unknown,
     shop: string,
     brandId: string
   ): NormalizedEvent | null {
-    const event = payload.event;
-    const entity = payload.payload?.payment?.entity || payload.payload?.order?.entity;
+    const typedPayload = payload as RazorpayPayload;
+    const event = typedPayload.event;
+    const entity = typedPayload.payload?.payment?.entity || typedPayload.payload?.order?.entity;
 
     if (!entity) {
       return null;
@@ -102,7 +130,7 @@ export class RazorpayProvider implements PaymentProvider {
   /**
    * Get configuration schema
    */
-  getConfigSchema(): Record<string, any> {
+  getConfigSchema(): Record<string, unknown> {
     return {
       enabled: {
         type: 'boolean',

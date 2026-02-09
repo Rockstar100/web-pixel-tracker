@@ -42,7 +42,7 @@ export class UmamiForwarder {
         body: JSON.stringify(body)
       });
 
-      const responseData = await response.json().catch(() => ({}));
+      const responseData = (await response.json().catch(() => ({}))) as Record<string, unknown>;
 
       // Log the forward attempt
       await this.logForwardAttempt(event, shopConfig, response.ok, responseData);
@@ -57,7 +57,7 @@ export class UmamiForwarder {
 
       return {
         success: true,
-        eventId: responseData.id || '',
+        eventId: typeof responseData.id === 'string' ? responseData.id : '',
         umamiResponse: responseData
       };
     } catch (error) {
@@ -91,9 +91,9 @@ export class UmamiForwarder {
     ];
 
     // Add event properties
-    const data: Record<string, any> = {
+    const data: Record<string, unknown> = {
       event_type: event.type,
-      ...event.data
+      ...(event.data ?? {})
     };
 
     // Add transaction data
@@ -138,7 +138,7 @@ export class UmamiForwarder {
     event: NormalizedEvent,
     shopConfig: ShopConfigData,
     success: boolean,
-    response: any
+    response: unknown
   ): Promise<void> {
     try {
       await prisma.healthLog.create({

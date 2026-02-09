@@ -5,7 +5,7 @@ import { EventDeduplicator } from "../../services/deduplicator";
 import { UmamiForwarder } from "../../services/umami-forwarder";
 import { AttributionTracker } from "../../services/attribution";
 import { PrivacyManager } from "../../services/privacy";
-import type { PixelEvent } from "../../services/types";
+import type { PixelEvent, ShopConfigData } from "../../services/types";
 
 const prisma = new PrismaClient();
 
@@ -42,7 +42,9 @@ export async function action({ request }: ActionFunctionArgs) {
 
     // Extract shop from request (could be from subdomain or header)
     const shop = request.headers.get("X-Shopify-Shop-Domain") ||
+                 pixelEvent.shopDomain ||
                  extractShopFromUrl(request.headers.get("referer") || "");
+    const normalizedShop = normalizeShopDomain(shop);
 
     if (!shop) {
       return Response.json(
@@ -52,10 +54,7 @@ export async function action({ request }: ActionFunctionArgs) {
     }
 
     // Get shop configuration
-    const shopConfig = await prisma.shopConfig.findUnique({
-      where: { shopifyShop: shop },
-      include: { brand: true }
-    });
+    const shopConfig = await findShopConfig(normalizedShop);
 
     if (!shopConfig) {
       return Response.json(
@@ -73,16 +72,17 @@ export async function action({ request }: ActionFunctionArgs) {
     }
 
     // Normalize the event
+    const typedShopConfig = shopConfig as ShopConfigData;
     let normalizedEvent = EventNormalizer.normalizePixelEvent(
       pixelEvent,
-      shopConfig as any
+      typedShopConfig
     );
 
     // Apply privacy policy (consent check + anonymization if needed)
     const hasConsent = true; // TODO: Get from Shopify Customer Privacy API
     const privacyCheckedEvent = PrivacyManager.applyPrivacyPolicy(
       normalizedEvent,
-      shopConfig as any,
+      typedShopConfig,
       hasConsent
     );
 
@@ -105,7 +105,7 @@ export async function action({ request }: ActionFunctionArgs) {
       return Response.json({ 
         message: "Duplicate event ignored",
         eventKey: dedupeResult.eventKey 
-      }, { status: 200 });
+      }, { status: 200, headers: corsHeaders });
     }
 
     // Capture attribution if it's a page view with UTM params
@@ -125,7 +125,7 @@ export async function action({ request }: ActionFunctionArgs) {
     // Forward to Umami
     const forwardResult = await UmamiForwarder.forward(
       enrichedEvent,
-      shopConfig as any
+      typedShopConfig
     );
 
     if (forwardResult.success) {
@@ -176,4 +176,37 @@ function extractShopFromUrl(url: string): string | null {
   } catch {
     return null;
   }
+}
+
+function normalizeShopDomain(shop: string | null): string | null {
+  if (!shop) {
+    return null;
+  }
+
+  const normalized = shop.trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+
+  return normalized.startsWith("www.") ? normalized.slice(4) : normalized;
+}
+
+async function findShopConfig(shop: string) {
+  const shopConfig = await prisma.shopConfig.findUnique({
+    where: { shopifyShop: shop },
+    include: { brand: true }
+  });
+
+  if (shopConfig) {
+    return shopConfig;
+  }
+
+  return prisma.shopConfig.findFirst({
+    where: {
+      brand: {
+        domains: { contains: shop }
+      }
+    },
+    include: { brand: true }
+  });
 }
