@@ -1,4 +1,3 @@
-import type { ActionFunctionArgs } from "@react-router/node";
 import { PrismaClient } from "@prisma/client";
 import { EventNormalizer } from "../../services/normalizer";
 import { EventDeduplicator } from "../../services/deduplicator";
@@ -9,24 +8,41 @@ import type { PixelEvent, ShopConfigData } from "../../services/types";
 
 const prisma = new PrismaClient();
 
+type ActionArgs = { request: Request };
+
+/**
+ * Get CORS headers based on request origin
+ * Reflects the Origin header for better security (allows specific domains)
+ */
+function getCorsHeaders(request: Request): Headers {
+  const origin = request.headers.get("Origin") || "*";
+  return new Headers({
+    "Access-Control-Allow-Origin": origin,
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, X-Shopify-Shop-Domain",
+  });
+}
+
 /**
  * Pixel event ingestion endpoint
  * Receives events from Web Pixel extension
  */
-export async function action({ request }: ActionFunctionArgs) {
-  const origin = request.headers.get("Origin") || "*";
-  const corsHeaders = new Headers({
-    "Access-Control-Allow-Origin": origin,
-    "Access-Control-Allow-Methods": "POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, X-Shopify-Shop-Domain"
-  });
+export async function action({ request }: ActionArgs) {
+  const corsHeaders = getCorsHeaders(request);
 
+  // Handle CORS preflight
   if (request.method === "OPTIONS") {
-    return new Response(null, { status: 204, headers: corsHeaders });
+    return new Response(null, {
+      status: 204,
+      headers: corsHeaders,
+    });
   }
 
   if (request.method !== "POST") {
-    return Response.json({ error: "Method not allowed" }, { status: 405, headers: corsHeaders });
+    return Response.json(
+      { error: "Method not allowed" },
+      { status: 405, headers: corsHeaders },
+    );
   }
 
   try {
@@ -39,23 +55,42 @@ export async function action({ request }: ActionFunctionArgs) {
     const normalizedShop = normalizeShopDomain(shop);
 
     if (!normalizedShop) {
-      return Response.json({ error: "Shop not identified" }, { status: 400, headers: corsHeaders });
+      return Response.json(
+        { error: "Shop not identified" },
+        { status: 400, headers: corsHeaders },
+      );
     }
 
-    // Get shop configuration
     const shopConfig = await findShopConfig(normalizedShop);
 
     if (!shopConfig) {
-      return Response.json({ error: "Shop not configured" }, { status: 404, headers: corsHeaders });
+      return Response.json(
+        { error: "Shop not configured" },
+        { status: 404, headers: corsHeaders },
+      );
     }
 
     // Check if pixel tracking is enabled
     if (!shopConfig.pixelEnabled) {
-      return Response.json({ message: "Pixel tracking disabled" }, { status: 200, headers: corsHeaders });
+      return Response.json(
+        { message: "Pixel tracking disabled" },
+        { status: 200, headers: corsHeaders },
+      );
     }
 
     // Normalize the event
-    const typedShopConfig = shopConfig as ShopConfigData;
+    const typedShopConfig: ShopConfigData = {
+      ...shopConfig,
+      consentMode: shopConfig.consentMode === "strict" ? "strict" : "relaxed",
+      providerSettings: shopConfig.providerSettings
+        ? (JSON.parse(shopConfig.providerSettings) as Record<string, unknown>)
+        : undefined,
+      brand: {
+        ...shopConfig.brand,
+        // Brand.domains is stored as JSON string in the DB; parse to string[]
+        domains: JSON.parse(shopConfig.brand.domains) as string[],
+      },
+    };
     let normalizedEvent = EventNormalizer.normalizePixelEvent(
       pixelEvent,
       typedShopConfig
@@ -70,7 +105,10 @@ export async function action({ request }: ActionFunctionArgs) {
     );
 
     if (!privacyCheckedEvent) {
-      return Response.json({ message: "Event blocked by privacy policy" }, { status: 200, headers: corsHeaders });
+      return Response.json(
+        { message: "Event blocked by privacy policy" },
+        { status: 200, headers: corsHeaders },
+      );
     }
 
     normalizedEvent = privacyCheckedEvent;
@@ -82,10 +120,13 @@ export async function action({ request }: ActionFunctionArgs) {
     );
 
     if (dedupeResult.isDuplicate) {
-      return Response.json({ 
-        message: "Duplicate event ignored",
-        eventKey: dedupeResult.eventKey 
-      }, { status: 200, headers: corsHeaders });
+      return Response.json(
+        { 
+          message: "Duplicate event ignored",
+          eventKey: dedupeResult.eventKey,
+        },
+        { status: 200, headers: corsHeaders },
+      );
     }
 
     // Capture attribution if it's a page view with UTM params
@@ -115,19 +156,25 @@ export async function action({ request }: ActionFunctionArgs) {
       );
     }
 
-    return Response.json({ 
-      success: true,
-      eventKey: dedupeResult.eventKey,
-      forwarded: forwardResult.success
-    }, { headers: corsHeaders });
+    return Response.json(
+      {
+        success: true,
+        eventKey: dedupeResult.eventKey,
+        forwarded: forwardResult.success,
+      },
+      { headers: corsHeaders },
+    );
 
   } catch (error) {
     console.error("Pixel ingestion error:", error);
     
-    return Response.json({ 
-      error: "Internal server error",
-      message: error instanceof Error ? error.message : "Unknown error"
-    }, { status: 500, headers: corsHeaders });
+    return Response.json(
+      {
+        error: "Internal server error",
+        message: error instanceof Error ? error.message : "Unknown error",
+      },
+      { status: 500, headers: corsHeaders },
+    );
   }
 }
 

@@ -11,7 +11,7 @@ type = "object"
 name = "Server endpoint"
 description = "Full URL for the pixel ingestion endpoint (e.g. https://app.example.com/api/ingest/pixel)"
 type = "single_line_text_field"
-validations =  [
+validations = [
   { name = "min", value = "1" }
 ]
 

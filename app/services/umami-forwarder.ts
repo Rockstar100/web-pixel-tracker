@@ -21,8 +21,16 @@ export class UmamiForwarder {
     shopConfig: ShopConfigData
   ): Promise<ForwardResult> {
     try {
-      // Build Umami payload
+      // Build inner Umami payload (matches `payload` shape from Umami /api/send)
       const payload = this.buildUmamiPayload(event, shopConfig);
+
+      // Wrap in envelope expected by Umami v2 /api/send
+      // See example:
+      // { "type": "event" | "pageview", "payload": { website, url, referrer, name, data, ... } }
+      const body = {
+        type: event.type === 'page_view' ? 'pageview' : 'event',
+        payload,
+      };
 
       // Send to Umami
       const response = await fetch(shopConfig.umamiEndpoint, {
@@ -31,7 +39,7 @@ export class UmamiForwarder {
           'Content-Type': 'application/json',
           'User-Agent': 'Seleric-Tracker/1.0'
         },
-        body: JSON.stringify(payload)
+        body: JSON.stringify(body)
       });
 
       const responseData = (await response.json().catch(() => ({}))) as Record<string, unknown>;
