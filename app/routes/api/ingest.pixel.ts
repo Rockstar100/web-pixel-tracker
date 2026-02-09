@@ -9,24 +9,32 @@ import type { PixelEvent, ShopConfigData } from "../../services/types";
 
 const prisma = new PrismaClient();
 
+// Basic CORS headers so the web pixel (running on the storefront domain)
+// can POST events to this API on a different origin.
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type",
+};
+
 /**
  * Pixel event ingestion endpoint
  * Receives events from Web Pixel extension
  */
 export async function action({ request }: ActionFunctionArgs) {
-  const origin = request.headers.get("Origin") || "*";
-  const corsHeaders = new Headers({
-    "Access-Control-Allow-Origin": origin,
-    "Access-Control-Allow-Methods": "POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, X-Shopify-Shop-Domain"
-  });
-
+  // Handle CORS preflight
   if (request.method === "OPTIONS") {
-    return new Response(null, { status: 204, headers: corsHeaders });
+    return new Response(null, {
+      status: 204,
+      headers: CORS_HEADERS,
+    });
   }
 
   if (request.method !== "POST") {
-    return Response.json({ error: "Method not allowed" }, { status: 405, headers: corsHeaders });
+    return Response.json(
+      { error: "Method not allowed" },
+      { status: 405, headers: CORS_HEADERS },
+    );
   }
 
   try {
@@ -38,20 +46,29 @@ export async function action({ request }: ActionFunctionArgs) {
                  extractShopFromUrl(request.headers.get("referer") || "");
     const normalizedShop = normalizeShopDomain(shop);
 
-    if (!normalizedShop) {
-      return Response.json({ error: "Shop not identified" }, { status: 400, headers: corsHeaders });
+    if (!shop) {
+      return Response.json(
+        { error: "Shop not identified" },
+        { status: 400, headers: CORS_HEADERS },
+      );
     }
 
     // Get shop configuration
     const shopConfig = await findShopConfig(normalizedShop);
 
     if (!shopConfig) {
-      return Response.json({ error: "Shop not configured" }, { status: 404, headers: corsHeaders });
+      return Response.json(
+        { error: "Shop not configured" },
+        { status: 404, headers: CORS_HEADERS },
+      );
     }
 
     // Check if pixel tracking is enabled
     if (!shopConfig.pixelEnabled) {
-      return Response.json({ message: "Pixel tracking disabled" }, { status: 200, headers: corsHeaders });
+      return Response.json(
+        { message: "Pixel tracking disabled" },
+        { status: 200, headers: CORS_HEADERS },
+      );
     }
 
     // Normalize the event
@@ -70,7 +87,10 @@ export async function action({ request }: ActionFunctionArgs) {
     );
 
     if (!privacyCheckedEvent) {
-      return Response.json({ message: "Event blocked by privacy policy" }, { status: 200, headers: corsHeaders });
+      return Response.json(
+        { message: "Event blocked by privacy policy" },
+        { status: 200, headers: CORS_HEADERS },
+      );
     }
 
     normalizedEvent = privacyCheckedEvent;
@@ -115,19 +135,25 @@ export async function action({ request }: ActionFunctionArgs) {
       );
     }
 
-    return Response.json({ 
-      success: true,
-      eventKey: dedupeResult.eventKey,
-      forwarded: forwardResult.success
-    }, { headers: corsHeaders });
+    return Response.json(
+      {
+        success: true,
+        eventKey: dedupeResult.eventKey,
+        forwarded: forwardResult.success,
+      },
+      { headers: CORS_HEADERS },
+    );
 
   } catch (error) {
     console.error("Pixel ingestion error:", error);
     
-    return Response.json({ 
-      error: "Internal server error",
-      message: error instanceof Error ? error.message : "Unknown error"
-    }, { status: 500, headers: corsHeaders });
+    return Response.json(
+      {
+        error: "Internal server error",
+        message: error instanceof Error ? error.message : "Unknown error",
+      },
+      { status: 500, headers: CORS_HEADERS },
+    );
   }
 }
 
