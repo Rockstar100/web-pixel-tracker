@@ -1,8 +1,6 @@
-# Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
-
 client_id = "4a43d1c4309a6f8a7474c76840f86eaa"
 name = "Seleric-Tracker"
-application_url = "https://example.com"
+application_url = "https://name-arrangements-customers-businesses.trycloudflare.com"
 embedded = true
 
 [build]
@@ -12,16 +10,16 @@ automatically_update_urls_on_dev = true
 api_version = "2026-04"
 
   [[webhooks.subscriptions]]
-  topics = [ "app/uninstalled" ]
+  topics = ["app/uninstalled"]
   uri = "/webhooks/app/uninstalled"
 
   [[webhooks.subscriptions]]
-  topics = [ "app/scopes_update" ]
+  topics = ["app/scopes_update"]
   uri = "/webhooks/app/scopes_update"
 
 [access_scopes]
 # Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
-scopes = "write_products,write_pixels,read_customer_events"
+scopes = "read_products,read_orders,read_customers,read_customer_events,write_pixels"
 
 [auth]
-redirect_urls = [ "https://example.com/api/auth" ]
+redirect_urls = ["https://name-arrangements-customers-businesses.trycloudflare.com/auth/callback"]

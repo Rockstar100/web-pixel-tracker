@@ -81,11 +81,19 @@ type PixelAnalyticsEvent = {
 
 register(({ analytics, browser, init, settings }) => {
   // Configuration from app settings
+  // - serverEndpoint: URL of the ingestion endpoint on your app
+  // - accountID: Optional Umami website UUID (if not using server-side config)
+  // - enableDebug: Enable console logging (true/false string)
   const config = {
-    serverEndpoint: settings.serverEndpoint || '',
-    enableDebug: settings.enableDebug || false,
+    serverEndpoint: settings.serverEndpoint || "",
+    // treat "true" (case-insensitive) as enabled
+    enableDebug:
+      typeof settings.enableDebug === "string"
+        ? settings.enableDebug.toLowerCase() === "true"
+        : false,
+    // Optional Umami website UUID - can be used for direct tracking if needed
+    accountID: settings.accountID || null,
   };
-
   // Session management
   let sessionId: string | null = null;
 

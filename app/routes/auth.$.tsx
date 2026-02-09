@@ -4,15 +4,38 @@ import { authenticate } from "../shopify.server";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const { admin } = await authenticate.admin(request);
+  const requestUrl = new URL(request.url);
+  console.log("🔐 AUTH CALLBACK TRIGGERED:", requestUrl.pathname, requestUrl.toString());
 
-  const appUrl = process.env.SHOPIFY_APP_URL;
-  if (appUrl) {
-    const serverEndpoint = `${appUrl.replace(/\/$/, "")}/api/ingest/pixel`;
-    await ensureWebPixel(admin, serverEndpoint);
-  } else {
-    console.warn("SHOPIFY_APP_URL is not set; skipping web pixel creation.");
+  let admin: { graphql: (query: string, options?: unknown) => Promise<Response> };
+  try {
+    ({ admin } = await authenticate.admin(request));
+  } catch (error) {
+    if (error instanceof Response) {
+      console.error("🚧 authenticate.admin returned a Response:", {
+        status: error.status,
+        statusText: error.statusText,
+        location: error.headers.get("location")
+      });
+    } else {
+      console.error("❌ authenticate.admin threw an error:", error);
+    }
+    throw error;
   }
+
+  const envAppUrl = process.env.SHOPIFY_APP_URL;
+  const appUrl = envAppUrl || new URL(request.url).origin;
+  const serverEndpoint = `${appUrl.replace(/\/$/, "")}/api/ingest/pixel`;
+
+  console.log("📍 Server endpoint for pixel:", serverEndpoint);
+
+  if (!envAppUrl) {
+    console.warn("SHOPIFY_APP_URL is not set; using request origin for web pixel:", appUrl);
+  }
+
+  console.log("🎯 Calling ensureWebPixel...");
+  await ensureWebPixel(admin, serverEndpoint);
+  console.log("✅ ensureWebPixel completed");
 
   return null;
 };
@@ -54,17 +77,25 @@ type WebPixelListResponse = {
 
 async function ensureWebPixel(admin: { graphql: (query: string, options?: unknown) => Promise<Response> }, serverEndpoint: string) {
   try {
+    console.log("🔍 ensureWebPixel starting...");
     const settings = {
       serverEndpoint,
       enableDebug: false
     };
 
+    console.log("📋 Pixel settings:", JSON.stringify(settings));
+
     const existingPixelId = await getExistingWebPixelId(admin);
+    console.log("🔎 Existing pixel ID:", existingPixelId);
+    
     if (existingPixelId) {
+      console.log("📝 Updating existing pixel...");
       await updateWebPixel(admin, existingPixelId, settings);
+      console.log("✅ Pixel updated successfully");
       return;
     }
 
+    console.log("🆕 Creating new pixel...");
     const response = await admin.graphql(
       `#graphql
         mutation CreateWebPixel($settings: JSON!) {
@@ -87,11 +118,16 @@ async function ensureWebPixel(admin: { graphql: (query: string, options?: unknow
 
     const payload = (await response.json()) as WebPixelCreateResponse;
     const errors = payload.data?.webPixelCreate?.userErrors ?? [];
+    
+    console.log("📦 webPixelCreate response:", JSON.stringify(payload, null, 2));
+    
     if (errors.length > 0) {
-      console.warn("Web pixel creation returned errors:", errors);
+      console.warn("⚠️ Web pixel creation returned errors:", errors);
+    } else {
+      console.log("✅ Web pixel created successfully!");
     }
   } catch (error) {
-    console.error("Failed to create web pixel:", error);
+    console.error("❌ Failed to create web pixel:", error);
   }
 }
 

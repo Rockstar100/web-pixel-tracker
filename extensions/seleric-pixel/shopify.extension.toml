@@ -15,7 +15,14 @@ validations = [
   { name = "min", value = "1" }
 ]
 
+[settings.fields.accountID]
+name = "Umami Website ID (UUID)"
+description = "The Umami website UUID for tracking events (optional; can be configured server-side)"
+type = "single_line_text_field"
+validations = []
+
 [settings.fields.enableDebug]
 name = "Enable debug logging"
-description = "Logs pixel events to the console for troubleshooting"
-type = "boolean"
+description = "Logs pixel events to the browser console for troubleshooting (true/false)"
+type = "single_line_text_field"
+validations = []
