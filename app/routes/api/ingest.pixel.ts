@@ -1,4 +1,3 @@
-import type { ActionFunctionArgs } from "@react-router/node";
 import { PrismaClient } from "@prisma/client";
 import { EventNormalizer } from "../../services/normalizer";
 import { EventDeduplicator } from "../../services/deduplicator";
@@ -17,11 +16,13 @@ const CORS_HEADERS = {
   "Access-Control-Allow-Headers": "Content-Type",
 };
 
+type ActionArgs = { request: Request };
+
 /**
  * Pixel event ingestion endpoint
  * Receives events from Web Pixel extension
  */
-export async function action({ request }: ActionFunctionArgs) {
+export async function action({ request }: ActionArgs) {
   // Handle CORS preflight
   if (request.method === "OPTIONS") {
     return new Response(null, {
@@ -41,9 +42,9 @@ export async function action({ request }: ActionFunctionArgs) {
     const pixelEvent: PixelEvent = await request.json();
 
     // Extract shop from request (could be from subdomain or header)
-    const shop = request.headers.get("X-Shopify-Shop-Domain") ||
-                 pixelEvent.shopDomain ||
-                 extractShopFromUrl(request.headers.get("referer") || "");
+  const shop = request.headers.get("X-Shopify-Shop-Domain") ||
+               pixelEvent.shopDomain ||
+               extractShopFromUrl(request.headers.get("referer") || "");
     const normalizedShop = normalizeShopDomain(shop);
 
     if (!shop) {
@@ -54,6 +55,13 @@ export async function action({ request }: ActionFunctionArgs) {
     }
 
     // Get shop configuration
+    if (!normalizedShop) {
+      return Response.json(
+        { error: "Shop not identified" },
+        { status: 400, headers: CORS_HEADERS },
+      );
+    }
+
     const shopConfig = await findShopConfig(normalizedShop);
 
     if (!shopConfig) {
@@ -72,7 +80,18 @@ export async function action({ request }: ActionFunctionArgs) {
     }
 
     // Normalize the event
-    const typedShopConfig = shopConfig as ShopConfigData;
+    const typedShopConfig: ShopConfigData = {
+      ...shopConfig,
+      consentMode: shopConfig.consentMode === "strict" ? "strict" : "relaxed",
+      providerSettings: shopConfig.providerSettings
+        ? (JSON.parse(shopConfig.providerSettings) as Record<string, unknown>)
+        : undefined,
+      brand: {
+        ...shopConfig.brand,
+        // Brand.domains is stored as JSON string in the DB; parse to string[]
+        domains: JSON.parse(shopConfig.brand.domains) as string[],
+      },
+    };
     let normalizedEvent = EventNormalizer.normalizePixelEvent(
       pixelEvent,
       typedShopConfig
@@ -102,10 +121,13 @@ export async function action({ request }: ActionFunctionArgs) {
     );
 
     if (dedupeResult.isDuplicate) {
-      return Response.json({ 
-        message: "Duplicate event ignored",
-        eventKey: dedupeResult.eventKey 
-      }, { status: 200, headers: corsHeaders });
+      return Response.json(
+        { 
+          message: "Duplicate event ignored",
+          eventKey: dedupeResult.eventKey,
+        },
+        { status: 200, headers: CORS_HEADERS },
+      );
     }
 
     // Capture attribution if it's a page view with UTM params
