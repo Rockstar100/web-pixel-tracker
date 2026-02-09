@@ -7,7 +7,7 @@ import { register } from "@shopify/web-pixels-extension";
 register(({ analytics, browser, init, settings }) => {
   // Configuration from app settings
   const config = {
-    serverEndpoint: settings.serverEndpoint || '/api/ingest/pixel',
+    serverEndpoint: settings.serverEndpoint || '/api/ingest.pixel',
     enableDebug: settings.enableDebug || false,
   };
 
