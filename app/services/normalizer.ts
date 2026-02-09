@@ -212,9 +212,13 @@ export class EventNormalizer {
   /**
    * Sanitize event data (remove PII, limit size)
    */
-  private static sanitizeEventData(data: any): Record<string, any> {
+  private static sanitizeEventData(data: unknown): Record<string, unknown> {
+    if (!data || typeof data !== 'object') {
+      return {};
+    }
+
     // Create a shallow copy
-    const sanitized = { ...data };
+    const sanitized = { ...(data as Record<string, unknown>) };
 
     // Remove direct PII fields
     const piiFields = [

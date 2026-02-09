@@ -5,7 +5,7 @@ import { EventDeduplicator } from "../../services/deduplicator";
 import { UmamiForwarder } from "../../services/umami-forwarder";
 import { AttributionTracker } from "../../services/attribution";
 import { PrivacyManager } from "../../services/privacy";
-import type { PixelEvent } from "../../services/types";
+import type { PixelEvent, ShopConfigData } from "../../services/types";
 
 const prisma = new PrismaClient();
 
@@ -14,8 +14,19 @@ const prisma = new PrismaClient();
  * Receives events from Web Pixel extension
  */
 export async function action({ request }: ActionFunctionArgs) {
+  const origin = request.headers.get("Origin") || "*";
+  const corsHeaders = new Headers({
+    "Access-Control-Allow-Origin": origin,
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, X-Shopify-Shop-Domain"
+  });
+
+  if (request.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: corsHeaders });
+  }
+
   if (request.method !== "POST") {
-    return Response.json({ error: "Method not allowed" }, { status: 405 });
+    return Response.json({ error: "Method not allowed" }, { status: 405, headers: corsHeaders });
   }
 
   try {
@@ -23,43 +34,43 @@ export async function action({ request }: ActionFunctionArgs) {
 
     // Extract shop from request (could be from subdomain or header)
     const shop = request.headers.get("X-Shopify-Shop-Domain") ||
+                 pixelEvent.shopDomain ||
                  extractShopFromUrl(request.headers.get("referer") || "");
+    const normalizedShop = normalizeShopDomain(shop);
 
-    if (!shop) {
-      return Response.json({ error: "Shop not identified" }, { status: 400 });
+    if (!normalizedShop) {
+      return Response.json({ error: "Shop not identified" }, { status: 400, headers: corsHeaders });
     }
 
     // Get shop configuration
-    const shopConfig = await prisma.shopConfig.findUnique({
-      where: { shopifyShop: shop },
-      include: { brand: true }
-    });
+    const shopConfig = await findShopConfig(normalizedShop);
 
     if (!shopConfig) {
-      return Response.json({ error: "Shop not configured" }, { status: 404 });
+      return Response.json({ error: "Shop not configured" }, { status: 404, headers: corsHeaders });
     }
 
     // Check if pixel tracking is enabled
     if (!shopConfig.pixelEnabled) {
-      return Response.json({ message: "Pixel tracking disabled" }, { status: 200 });
+      return Response.json({ message: "Pixel tracking disabled" }, { status: 200, headers: corsHeaders });
     }
 
     // Normalize the event
+    const typedShopConfig = shopConfig as ShopConfigData;
     let normalizedEvent = EventNormalizer.normalizePixelEvent(
       pixelEvent,
-      shopConfig as any
+      typedShopConfig
     );
 
     // Apply privacy policy (consent check + anonymization if needed)
     const hasConsent = true; // TODO: Get from Shopify Customer Privacy API
     const privacyCheckedEvent = PrivacyManager.applyPrivacyPolicy(
       normalizedEvent,
-      shopConfig as any,
+      typedShopConfig,
       hasConsent
     );
 
     if (!privacyCheckedEvent) {
-      return Response.json({ message: "Event blocked by privacy policy" }, { status: 200 });
+      return Response.json({ message: "Event blocked by privacy policy" }, { status: 200, headers: corsHeaders });
     }
 
     normalizedEvent = privacyCheckedEvent;
@@ -74,7 +85,7 @@ export async function action({ request }: ActionFunctionArgs) {
       return Response.json({ 
         message: "Duplicate event ignored",
         eventKey: dedupeResult.eventKey 
-      }, { status: 200 });
+      }, { status: 200, headers: corsHeaders });
     }
 
     // Capture attribution if it's a page view with UTM params
@@ -94,7 +105,7 @@ export async function action({ request }: ActionFunctionArgs) {
     // Forward to Umami
     const forwardResult = await UmamiForwarder.forward(
       enrichedEvent,
-      shopConfig as any
+      typedShopConfig
     );
 
     if (forwardResult.success) {
@@ -108,7 +119,7 @@ export async function action({ request }: ActionFunctionArgs) {
       success: true,
       eventKey: dedupeResult.eventKey,
       forwarded: forwardResult.success
-    });
+    }, { headers: corsHeaders });
 
   } catch (error) {
     console.error("Pixel ingestion error:", error);
@@ -116,7 +127,7 @@ export async function action({ request }: ActionFunctionArgs) {
     return Response.json({ 
       error: "Internal server error",
       message: error instanceof Error ? error.message : "Unknown error"
-    }, { status: 500 });
+    }, { status: 500, headers: corsHeaders });
   }
 }
 
@@ -139,4 +150,37 @@ function extractShopFromUrl(url: string): string | null {
   } catch {
     return null;
   }
+}
+
+function normalizeShopDomain(shop: string | null): string | null {
+  if (!shop) {
+    return null;
+  }
+
+  const normalized = shop.trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+
+  return normalized.startsWith("www.") ? normalized.slice(4) : normalized;
+}
+
+async function findShopConfig(shop: string) {
+  const shopConfig = await prisma.shopConfig.findUnique({
+    where: { shopifyShop: shop },
+    include: { brand: true }
+  });
+
+  if (shopConfig) {
+    return shopConfig;
+  }
+
+  return prisma.shopConfig.findFirst({
+    where: {
+      brand: {
+        domains: { contains: shop }
+      }
+    },
+    include: { brand: true }
+  });
 }
