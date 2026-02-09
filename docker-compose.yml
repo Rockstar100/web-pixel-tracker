@@ -1,53 +1,28 @@
 version: '3.8'
 
 services:
-  # PostgreSQL Database
-  postgres:
-    image: postgres:15-alpine
-    container_name: seleric_tracker_db
+  # Seleric-Tracker Application
+  app:
+    build: .
+    container_name: seleric_tracker_app
     restart: unless-stopped
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: seleric_tracker
     ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - ./prisma/migrations:/docker-entrypoint-initdb.d:ro
+      # Bind to localhost only — Nginx reverse-proxies public traffic
+      - "127.0.0.1:4201:4201"
+    env_file:
+      - .env.production
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - seleric_network
-
-  # Optional: PgAdmin for database management
-  pgadmin:
-    image: dpage/pgadmin4:latest
-    container_name: seleric_pgadmin
-    restart: unless-stopped
-    environment:
-      PGADMIN_DEFAULT_EMAIL: admin@seleric.local
-      PGADMIN_DEFAULT_PASSWORD: admin
-      PGADMIN_LISTEN_PORT: 5050
-    ports:
-      - "5050:5050"
-    volumes:
-      - pgadmin_data:/var/lib/pgadmin
-    depends_on:
-      postgres:
-        condition: service_healthy
-    networks:
-      - seleric_network
-
-volumes:
-  postgres_data:
-    driver: local
-  pgadmin_data:
-    driver: local
+      test: ["CMD-SHELL", "wget -qO- http://localhost:4201/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 networks:
-  seleric_network:
+  default:
     driver: bridge
