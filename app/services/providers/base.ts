@@ -14,12 +14,12 @@ export interface PaymentProvider {
   /**
    * Normalize provider webhook to NormalizedEvent
    */
-  normalizeWebhook(payload: any, shop: string, brandId: string): NormalizedEvent | null;
+  normalizeWebhook(payload: unknown, shop: string, brandId: string): NormalizedEvent | null;
   
   /**
    * Get provider-specific configuration schema
    */
-  getConfigSchema(): Record<string, any>;
+  getConfigSchema(): Record<string, unknown>;
 }
 
 /**

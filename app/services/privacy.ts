@@ -107,13 +107,15 @@ export class PrivacyManager {
    * (This would integrate with Shopify's Customer Privacy API)
    */
   static async getConsentStatus(
-    shopDomain: string,
-    sessionId?: string
+    _shopDomain: string,
+    _sessionId?: string
   ): Promise<{
     analytics: boolean;
     marketing: boolean;
     preferences: boolean;
   }> {
+    void _shopDomain;
+    void _sessionId;
     // TODO: Integrate with Shopify Customer Privacy API
     // For now, return default permissive consent
     return {
@@ -129,8 +131,8 @@ export class PrivacyManager {
   static createPrivatePayload(
     event: NormalizedEvent,
     includeIdentity: boolean = true
-  ): Record<string, any> {
-    const payload: Record<string, any> = {
+  ): Record<string, unknown> {
+    const payload: Record<string, unknown> = {
       event_type: event.type,
       timestamp: event.timestamp.toISOString(),
       source: event.source
@@ -167,8 +169,8 @@ export class PrivacyManager {
   /**
    * Filter out sensitive data from event payload
    */
-  private static filterSensitiveData(data: Record<string, any>): Record<string, any> {
-    const filtered: Record<string, any> = {};
+  private static filterSensitiveData(data: Record<string, unknown>): Record<string, unknown> {
+    const filtered: Record<string, unknown> = {};
     const sensitiveFields = [
       'email', 'phone', 'first_name', 'last_name',
       'customer', 'billing_address', 'shipping_address',

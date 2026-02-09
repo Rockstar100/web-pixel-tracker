@@ -4,8 +4,7 @@ import { EventNormalizer } from "../../services/normalizer";
 import { EventDeduplicator } from "../../services/deduplicator";
 import { UmamiForwarder } from "../../services/umami-forwarder";
 import { AttributionTracker } from "../../services/attribution";
-import type { ShopifyWebhookPayload } from "../../services/types";
-import crypto from "crypto";
+import type { ShopifyWebhookPayload, ShopConfigData } from "../../services/types";
 
 const prisma = new PrismaClient();
 
@@ -53,10 +52,11 @@ export async function action({ request }: ActionFunctionArgs) {
     }
 
     // Normalize the webhook event
+    const typedShopConfig = shopConfig as ShopConfigData;
     const normalizedEvent = EventNormalizer.normalizeWebhookEvent(
       "orders/paid",
       payload,
-      shopConfig as any
+      typedShopConfig
     );
 
     // Check for duplicates
@@ -103,7 +103,7 @@ export async function action({ request }: ActionFunctionArgs) {
     // Forward to Umami
     const forwardResult = await UmamiForwarder.forward(
       enrichedEvent,
-      shopConfig as any
+      typedShopConfig
     );
 
     if (forwardResult.success) {
@@ -142,20 +142,4 @@ export async function action({ request }: ActionFunctionArgs) {
       message: error instanceof Error ? error.message : "Unknown error"
     }, { status: 500 });
   }
-}
-
-/**
- * Verify Shopify webhook HMAC
- */
-function verifyWebhookHmac(
-  rawBody: string,
-  hmacHeader: string,
-  secret: string
-): boolean {
-  const hash = crypto
-    .createHmac("sha256", secret)
-    .update(rawBody, "utf8")
-    .digest("base64");
-
-  return hash === hmacHeader;
 }

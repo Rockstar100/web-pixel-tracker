@@ -4,6 +4,7 @@ import { ProviderRegistry } from "../../services/providers/base";
 import { RazorpayProvider } from "../../services/providers/razorpay";
 import { EventDeduplicator } from "../../services/deduplicator";
 import { UmamiForwarder } from "../../services/umami-forwarder";
+import type { ShopConfigData } from "../../services/types";
 
 const prisma = new PrismaClient();
 
@@ -112,9 +113,10 @@ export async function action({ request, params }: ActionFunctionArgs) {
     }
 
     // Forward to Umami
+    const typedShopConfig = shopConfig as ShopConfigData;
     const forwardResult = await UmamiForwarder.forward(
       normalizedEvent,
-      shopConfig as any
+      typedShopConfig
     );
 
     if (forwardResult.success) {
