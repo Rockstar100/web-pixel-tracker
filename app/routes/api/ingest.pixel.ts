@@ -8,33 +8,40 @@ import type { PixelEvent, ShopConfigData } from "../../services/types";
 
 const prisma = new PrismaClient();
 
-// Basic CORS headers so the web pixel (running on the storefront domain)
-// can POST events to this API on a different origin.
-const CORS_HEADERS = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type",
-};
-
 type ActionArgs = { request: Request };
+
+/**
+ * Get CORS headers based on request origin
+ * Reflects the Origin header for better security (allows specific domains)
+ */
+function getCorsHeaders(request: Request): Headers {
+  const origin = request.headers.get("Origin") || "*";
+  return new Headers({
+    "Access-Control-Allow-Origin": origin,
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, X-Shopify-Shop-Domain",
+  });
+}
 
 /**
  * Pixel event ingestion endpoint
  * Receives events from Web Pixel extension
  */
 export async function action({ request }: ActionArgs) {
+  const corsHeaders = getCorsHeaders(request);
+
   // Handle CORS preflight
   if (request.method === "OPTIONS") {
     return new Response(null, {
       status: 204,
-      headers: CORS_HEADERS,
+      headers: corsHeaders,
     });
   }
 
   if (request.method !== "POST") {
     return Response.json(
       { error: "Method not allowed" },
-      { status: 405, headers: CORS_HEADERS },
+      { status: 405, headers: corsHeaders },
     );
   }
 
@@ -42,23 +49,15 @@ export async function action({ request }: ActionArgs) {
     const pixelEvent: PixelEvent = await request.json();
 
     // Extract shop from request (could be from subdomain or header)
-  const shop = request.headers.get("X-Shopify-Shop-Domain") ||
-               pixelEvent.shopDomain ||
-               extractShopFromUrl(request.headers.get("referer") || "");
+    const shop = request.headers.get("X-Shopify-Shop-Domain") ||
+                 pixelEvent.shopDomain ||
+                 extractShopFromUrl(request.headers.get("referer") || "");
     const normalizedShop = normalizeShopDomain(shop);
 
-    if (!shop) {
-      return Response.json(
-        { error: "Shop not identified" },
-        { status: 400, headers: CORS_HEADERS },
-      );
-    }
-
-    // Get shop configuration
     if (!normalizedShop) {
       return Response.json(
         { error: "Shop not identified" },
-        { status: 400, headers: CORS_HEADERS },
+        { status: 400, headers: corsHeaders },
       );
     }
 
@@ -67,7 +66,7 @@ export async function action({ request }: ActionArgs) {
     if (!shopConfig) {
       return Response.json(
         { error: "Shop not configured" },
-        { status: 404, headers: CORS_HEADERS },
+        { status: 404, headers: corsHeaders },
       );
     }
 
@@ -75,7 +74,7 @@ export async function action({ request }: ActionArgs) {
     if (!shopConfig.pixelEnabled) {
       return Response.json(
         { message: "Pixel tracking disabled" },
-        { status: 200, headers: CORS_HEADERS },
+        { status: 200, headers: corsHeaders },
       );
     }
 
@@ -108,7 +107,7 @@ export async function action({ request }: ActionArgs) {
     if (!privacyCheckedEvent) {
       return Response.json(
         { message: "Event blocked by privacy policy" },
-        { status: 200, headers: CORS_HEADERS },
+        { status: 200, headers: corsHeaders },
       );
     }
 
@@ -126,7 +125,7 @@ export async function action({ request }: ActionArgs) {
           message: "Duplicate event ignored",
           eventKey: dedupeResult.eventKey,
         },
-        { status: 200, headers: CORS_HEADERS },
+        { status: 200, headers: corsHeaders },
       );
     }
 
@@ -163,7 +162,7 @@ export async function action({ request }: ActionArgs) {
         eventKey: dedupeResult.eventKey,
         forwarded: forwardResult.success,
       },
-      { headers: CORS_HEADERS },
+      { headers: corsHeaders },
     );
 
   } catch (error) {
@@ -174,7 +173,7 @@ export async function action({ request }: ActionArgs) {
         error: "Internal server error",
         message: error instanceof Error ? error.message : "Unknown error",
       },
-      { status: 500, headers: CORS_HEADERS },
+      { status: 500, headers: corsHeaders },
     );
   }
 }
