@@ -82,7 +82,7 @@ type PixelAnalyticsEvent = {
 register(({ analytics, browser, init, settings }) => {
   // Configuration from app settings
   const config = {
-    serverEndpoint: settings.serverEndpoint || '',
+    serverEndpoint: settings.serverEndpoint || '/api/ingest.pixel',
     enableDebug: settings.enableDebug || false,
   };
 

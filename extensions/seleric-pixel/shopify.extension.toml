@@ -16,14 +16,14 @@ validations =  [
 ]
 
 [settings.fields.serverEndpoint]
-name = "Server endpoint"
-description = "Full URL for the pixel ingestion endpoint (e.g. https://app.example.com/api/ingest/pixel)"
+name = "Server Endpoint"
+description = "API endpoint for event ingestion"
 type = "single_line_text_field"
-validations =  [
+validations = [
   { name = "min", value = "1" }
 ]
 
 [settings.fields.enableDebug]
-name = "Enable debug logging"
-description = "Logs pixel events to the console for troubleshooting"
-type = "boolean"
+name = "Enable Debug"
+description = "Enable debug logging"
+type = "single_line_text_field"
