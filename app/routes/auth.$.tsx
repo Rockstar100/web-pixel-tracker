@@ -80,7 +80,8 @@ async function ensureWebPixel(admin: { graphql: (query: string, options?: unknow
     console.log("🔍 ensureWebPixel starting...");
     const settings = {
       serverEndpoint,
-      enableDebug: false
+      accountID: "server-side",
+      enableDebug: "false"
     };
 
     console.log("📋 Pixel settings:", JSON.stringify(settings));
@@ -155,7 +156,7 @@ async function getExistingWebPixelId(admin: { graphql: (query: string, options?:
 async function updateWebPixel(
   admin: { graphql: (query: string, options?: unknown) => Promise<Response> },
   id: string,
-  settings: { serverEndpoint: string; enableDebug: boolean }
+  settings: { serverEndpoint: string; enableDebug: string }
 ) {
   try {
     const response = await admin.graphql(

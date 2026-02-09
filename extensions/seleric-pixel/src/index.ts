@@ -79,7 +79,7 @@ type PixelAnalyticsEvent = {
   context: PixelContext;
 };
 
-register(({ analytics, browser, init, settings }) => {
+register(({ analytics, browser, settings }) => {
   // Configuration from app settings
   // - serverEndpoint: URL of the ingestion endpoint on your app
   // - accountID: Optional Umami website UUID (if not using server-side config)
@@ -331,13 +331,11 @@ register(({ analytics, browser, init, settings }) => {
     });
   }
 
-  // Initialize
-  init(() => {
-    if (config.enableDebug) {
-      console.log('[Seleric] Pixel initialized');
-    }
-    
-    initSession();
-    subscribeToEvents();
-  });
+  // Initialize immediately when the pixel loads
+  if (config.enableDebug) {
+    console.log('[Seleric] Pixel initialized');
+  }
+
+  initSession();
+  subscribeToEvents();
 });

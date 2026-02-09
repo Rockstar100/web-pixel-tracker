@@ -24,8 +24,20 @@ function getCorsHeaders(request: Request): Headers {
 }
 
 /**
+ * Handle GET/HEAD/OPTIONS requests (CORS preflight lands here in React Router)
+ */
+export async function loader({ request }: ActionArgs) {
+  const corsHeaders = getCorsHeaders(request);
+  // CORS preflight
+  return new Response(null, {
+    status: 204,
+    headers: corsHeaders,
+  });
+}
+
+/**
  * Pixel event ingestion endpoint
- * Receives events from Web Pixel extension
+ * Receives events from Web Pixel extension (POST)
  */
 export async function action({ request }: ActionArgs) {
   const corsHeaders = getCorsHeaders(request);
