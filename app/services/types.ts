@@ -39,7 +39,7 @@ export interface NormalizedEvent {
   source: 'pixel' | 'webhook' | 'provider';
   
   // Additional properties
-  data?: Record<string, any>;
+  data?: Record<string, unknown>;
 }
 
 export interface UmamiPayload {
@@ -51,7 +51,7 @@ export interface UmamiPayload {
   title?: string;
   url: string;
   name?: string; // Event name
-  data?: Record<string, any>; // Event properties
+  data?: Record<string, unknown>; // Event properties
   tag?: string; // Segmentation tag
 }
 
@@ -59,6 +59,7 @@ export interface PixelEvent {
   id?: string;
   name: string;
   timestamp: string;
+  shopDomain?: string | null;
   context: {
     document?: {
       location?: {
@@ -77,14 +78,14 @@ export interface PixelEvent {
     };
   };
   clientId?: string;
-  data?: any;
+  data?: unknown;
 }
 
 export interface ShopifyWebhookPayload {
   // Generic webhook structure
   id?: number | string;
   admin_graphql_api_id?: string;
-  [key: string]: any;
+  [key: string]: unknown;
 }
 
 export interface BrandConfig {
@@ -106,18 +107,18 @@ export interface ShopConfigData {
   webhookEnabled: boolean;
   consentMode: 'strict' | 'relaxed';
   requireConsent: boolean;
-  providerSettings?: Record<string, any>;
+  providerSettings?: Record<string, unknown>;
 }
 
 export interface DedupeResult {
   isDuplicate: boolean;
-  existingEvent?: any;
+  existingEvent?: unknown;
   eventKey: string;
 }
 
 export interface ForwardResult {
   success: boolean;
   eventId: string;
-  umamiResponse?: any;
+  umamiResponse?: unknown;
   error?: string;
 }
