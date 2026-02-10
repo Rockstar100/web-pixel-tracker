@@ -823,6 +823,133 @@ app.post(
   }
 );
 
+// ---------------------------------------------------------------------------
+// Dashboard Authentication (password-protected admin area)
+// ---------------------------------------------------------------------------
+const DASHBOARD_TOKEN_SECRET =
+  process.env.SHOPIFY_API_SECRET || "seleric-dashboard-fallback-key";
+
+function generateDashboardToken() {
+  const payload = `dashboard:${Date.now()}`;
+  const sig = crypto
+    .createHmac("sha256", DASHBOARD_TOKEN_SECRET)
+    .update(payload)
+    .digest("hex");
+  return `${Buffer.from(payload).toString("base64")}.${sig}`;
+}
+
+function verifyDashboardToken(token) {
+  if (!token) return false;
+  try {
+    const [payloadB64, sig] = token.split(".");
+    if (!payloadB64 || !sig) return false;
+    const payload = Buffer.from(payloadB64, "base64").toString();
+    const expected = crypto
+      .createHmac("sha256", DASHBOARD_TOKEN_SECRET)
+      .update(payload)
+      .digest("hex");
+    if (sig !== expected) return false;
+    // Check token age (valid for 24 hours)
+    const ts = parseInt(payload.split(":")[1], 10);
+    return Date.now() - ts < 24 * 60 * 60 * 1000;
+  } catch {
+    return false;
+  }
+}
+
+const LOGIN_PAGE_HTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Seleric Tracker — Login</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { min-height: 100vh; display: flex; align-items: center; justify-content: center; background: #f0f2f5; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+    .card { background: #fff; padding: 40px; border-radius: 12px; box-shadow: 0 4px 24px rgba(0,0,0,0.08); width: 100%; max-width: 400px; }
+    .logo { font-size: 24px; font-weight: 700; color: #1a1a2e; margin-bottom: 8px; }
+    .subtitle { color: #6b7280; font-size: 14px; margin-bottom: 28px; }
+    label { display: block; font-weight: 600; font-size: 13px; color: #374151; margin-bottom: 6px; }
+    input[type=password] { width: 100%; padding: 10px 14px; font-size: 15px; border: 1px solid #d1d5db; border-radius: 8px; outline: none; transition: border 0.2s; }
+    input[type=password]:focus { border-color: #008060; box-shadow: 0 0 0 3px rgba(0,128,96,0.12); }
+    button { width: 100%; padding: 11px; margin-top: 18px; font-size: 15px; font-weight: 600; color: #fff; background: #008060; border: none; border-radius: 8px; cursor: pointer; transition: background 0.2s; }
+    button:hover { background: #006e52; }
+    .error { margin-top: 14px; padding: 10px 14px; background: #fef2f2; color: #b91c1c; border-radius: 8px; font-size: 13px; display: none; }
+    .error.show { display: block; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">Seleric Tracker</div>
+    <div class="subtitle">Sign in to access the admin dashboard</div>
+    <form method="POST" action="/dashboard/login">
+      <label for="password">Password</label>
+      <input type="password" id="password" name="password" placeholder="Enter dashboard password" required autofocus />
+      <button type="submit">Sign In</button>
+    </form>
+    <div class="error __ERROR_CLASS__">Invalid password. Please try again.</div>
+  </div>
+</body>
+</html>`;
+
+// Login page GET
+app.get("/dashboard/login", (req, res) => {
+  const failed = req.query.error === "1";
+  const html = LOGIN_PAGE_HTML.replace(
+    "__ERROR_CLASS__",
+    failed ? "show" : ""
+  );
+  res.type("html").send(html);
+});
+
+// Login POST (validates password, sets cookie)
+app.post("/dashboard/login", express.urlencoded({ extended: false }), (req, res) => {
+  const password = req.body?.password || "";
+  const expected = process.env.DASHBOARD_PASSWORD;
+
+  if (!expected) {
+    // No password set — block access entirely
+    return res.status(503).send("Dashboard password not configured on server.");
+  }
+
+  if (password === expected) {
+    const token = generateDashboardToken();
+    res.cookie("__seleric_dash", token, {
+      httpOnly: true,
+      secure: true,
+      sameSite: "lax",
+      maxAge: 24 * 60 * 60 * 1000, // 24 hours
+      path: "/",
+    });
+    return res.redirect("/dashboard");
+  }
+
+  return res.redirect("/dashboard/login?error=1");
+});
+
+// Logout
+app.get("/dashboard/logout", (req, res) => {
+  res.clearCookie("__seleric_dash", { path: "/" });
+  res.redirect("/dashboard/login");
+});
+
+// Auth middleware — protect /dashboard (except /dashboard/login & /dashboard/logout)
+import cookieParser from "cookie-parser";
+app.use(cookieParser());
+
+app.use("/dashboard", (req, res, next) => {
+  // Allow login/logout routes through
+  if (req.path === "/login" || req.path === "/logout") return next();
+
+  const token = req.cookies?.__seleric_dash;
+  if (verifyDashboardToken(token)) {
+    return next();
+  }
+
+  // Not authenticated — redirect to login
+  return res.redirect("/dashboard/login");
+});
+
 // ---- Static files from the React Router client build ----
 app.use(
   express.static("build/client", {
