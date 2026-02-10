@@ -79,7 +79,7 @@ type PixelAnalyticsEvent = {
   context: PixelContext;
 };
 
-register(({ analytics, browser, settings }) => {
+register(({ analytics, browser, settings, init }) => {
   // Configuration from app settings
   // - serverEndpoint: URL of the ingestion endpoint on your app
   // - accountID: Optional Umami website UUID (if not using server-side config)
@@ -94,6 +94,14 @@ register(({ analytics, browser, settings }) => {
     // Optional Umami website UUID - can be used for direct tracking if needed
     accountID: settings.accountID || null,
   };
+
+  // Resolve the myshopify domain from init data (most reliable source)
+  const myshopifyDomain: string | null =
+    (init as Record<string, unknown>)?.data &&
+    typeof (init as Record<string, unknown>).data === "object"
+      ? ((init as Record<string, { myshopifyDomain?: string }>).data?.myshopifyDomain || null)
+      : null;
+
   // Session management
   let sessionId: string | null = null;
 
@@ -124,9 +132,11 @@ register(({ analytics, browser, settings }) => {
 
   /**
    * Resolve shop domain for tracking
+   * Priority: init myshopifyDomain > context shop > document hostname
    */
   function resolveShopDomain(context: PixelContext): string | null {
     return (
+      myshopifyDomain ||
       context?.shop?.myshopifyDomain ||
       context?.shop?.domain ||
       context?.document?.location?.hostname ||
