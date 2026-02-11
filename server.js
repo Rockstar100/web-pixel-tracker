@@ -271,7 +271,118 @@ function verifyShopifyHmac(rawBody, hmacHeader) {
 }
 
 // ---------------------------------------------------------------------------
+// Auto-provision ShopConfig for unknown shops (prevents webhook data loss)
+// ---------------------------------------------------------------------------
+async function ensureShopConfig(db, shopDomain) {
+  let shopConfig = await db.shopConfig.findUnique({
+    where: { shopifyShop: shopDomain },
+    include: { brand: true },
+  });
+
+  if (!shopConfig) {
+    console.log(`[AutoConfig] Auto-creating Brand + ShopConfig for ${shopDomain}`);
+    try {
+      const brandName = shopDomain.replace(".myshopify.com", "");
+      const placeholderUuid = `auto-${crypto.randomUUID()}`;
+      const brand = await db.brand.create({
+        data: {
+          name: brandName,
+          umamiWebsiteUuid: placeholderUuid,
+          domains: JSON.stringify([shopDomain]),
+          defaultCurrency: "INR",
+          enabled: true,
+        },
+      });
+      shopConfig = await db.shopConfig.create({
+        data: {
+          shopifyShop: shopDomain,
+          brandId: brand.id,
+          pixelEnabled: true,
+          webhookEnabled: true,
+          consentMode: "relaxed",
+          requireConsent: false,
+        },
+        include: { brand: true },
+      });
+      console.log(`[AutoConfig] Created provisional config for ${shopDomain}`);
+    } catch (err) {
+      if (err?.code === "P2002") {
+        shopConfig = await db.shopConfig.findUnique({
+          where: { shopifyShop: shopDomain },
+          include: { brand: true },
+        });
+      } else {
+        console.error("[AutoConfig] Failed:", err);
+      }
+    }
+  }
+  return shopConfig;
+}
+
+// ---------------------------------------------------------------------------
+// Helper: hash a sessionId to use as customerHash when no email is available
+// ---------------------------------------------------------------------------
+function hashSessionId(sessionId) {
+  return crypto.createHash("sha256").update(sessionId).digest("hex");
+}
+
+// ---------------------------------------------------------------------------
+// Helper: find pixel session ID by matching a recent checkout_completed pixel
+// event for the same order, so we can link the webhook to the browsing session
+// ---------------------------------------------------------------------------
+async function findPixelSessionForOrder(db, shopConfigId, orderId) {
+  if (!orderId) return null;
+  try {
+    // Look for a recent checkout_completed pixel event that contains this order ID
+    const recentPixelEvents = await db.customerEvent.findMany({
+      where: {
+        shopConfigId,
+        source: "pixel",
+        eventType: { in: ["checkout_completed", "checkout_started", "payment_info_submitted"] },
+        timestamp: { gte: new Date(Date.now() - 60 * 60 * 1000) }, // last hour
+      },
+      orderBy: { timestamp: "desc" },
+      take: 10,
+      select: { sessionId: true, customerHash: true, orderId: true, eventData: true },
+    });
+
+    // Try to match by orderId directly or by parsing eventData
+    for (const ev of recentPixelEvents) {
+      if (ev.orderId === orderId || ev.orderId === String(orderId)) {
+        return ev.sessionId;
+      }
+      // Check eventData for order ID match
+      if (ev.eventData) {
+        try {
+          const data = JSON.parse(ev.eventData);
+          const pixelOrderId =
+            data.order_id || data.checkout?.order?.id;
+          if (
+            pixelOrderId &&
+            (String(pixelOrderId) === String(orderId) ||
+             String(pixelOrderId).includes(String(orderId)))
+          ) {
+            return ev.sessionId;
+          }
+        } catch { /* ignore */ }
+      }
+    }
+
+    // Fallback: return the most recent checkout session (best guess)
+    if (recentPixelEvents.length > 0 && recentPixelEvents[0].sessionId) {
+      console.log(`[Webhook] Using most recent pixel checkout session as fallback`);
+      return recentPixelEvents[0].sessionId;
+    }
+  } catch (err) {
+    console.error("[Webhook] findPixelSessionForOrder error:", err.message);
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // Webhook handler — processes Shopify order/customer webhooks
+// Now writes to OrderTracking, CustomerEvent, CustomerProfile, CustomerJourney
+// to match the same pipeline that pixel events go through.
 // ---------------------------------------------------------------------------
 async function handleShopifyWebhook(req, res, rawBody) {
   try {
@@ -294,14 +405,11 @@ async function handleShopifyWebhook(req, res, rawBody) {
 
     console.log(`[Webhook] Received ${topic} from ${shop}`);
 
-    // Look up shop configuration
-    const shopConfig = await db.shopConfig.findUnique({
-      where: { shopifyShop: shop },
-      include: { brand: true },
-    });
+    // Look up or auto-create shop configuration
+    const shopConfig = await ensureShopConfig(db, shop);
 
     if (!shopConfig) {
-      console.warn(`[Webhook] Shop not configured: ${shop}`);
+      console.warn(`[Webhook] Shop not configured and auto-create failed: ${shop}`);
       return res.status(404).json({ error: "Shop not configured" });
     }
 
@@ -320,11 +428,13 @@ async function handleShopifyWebhook(req, res, rawBody) {
 
     // Determine event type
     const eventType =
-      eventName.includes("purchase") || eventName.includes("order")
+      eventName === "purchase" || eventName === "order_created"
         ? "conversion"
-        : eventName.includes("customer")
-          ? "customer"
-          : "other";
+        : eventName.includes("order")
+          ? "conversion"
+          : eventName.includes("customer")
+            ? "customer"
+            : "other";
 
     // Extract order data
     const orderId = payload.id ? String(payload.id) : undefined;
@@ -334,6 +444,8 @@ async function handleShopifyWebhook(req, res, rawBody) {
     const currency =
       payload.currency || shopConfig.brand?.defaultCurrency || "USD";
     const itemsCount = payload.line_items?.length || 0;
+    const paymentMethod =
+      payload.payment_gateway_names?.join(", ") || payload.gateway || "";
 
     // Hash customer email for privacy
     let customerHash = null;
@@ -348,7 +460,7 @@ async function handleShopifyWebhook(req, res, rawBody) {
     // Build dedupe key
     const eventKey = `${shop}:webhook:${eventName}:${orderId || Date.now()}`;
 
-    // Store event (with deduplication)
+    // ── Store event in EventReceived (dedup log) ──
     try {
       await db.eventReceived.create({
         data: {
@@ -365,36 +477,283 @@ async function handleShopifyWebhook(req, res, rawBody) {
             financial_status: payload.financial_status,
             fulfillment_status: payload.fulfillment_status,
             order_number: payload.order_number,
+            payment_method: paymentMethod,
             line_items: (payload.line_items || []).map((li) => ({
               title: li.title,
               quantity: li.quantity,
               price: li.price,
               sku: li.sku,
-              variant_title: li.variant_title,
-              product_id: li.product_id,
             })),
           }),
           forwardedToUmami: false,
         },
       });
-      console.log(`[Webhook] Stored event: ${eventKey}`);
+      console.log(`[Webhook] Stored EventReceived: ${eventKey}`);
     } catch (storeErr) {
       if (storeErr?.code === "P2002") {
         console.log(`[Webhook] Duplicate event ignored: ${eventKey}`);
         return res.status(200).json({ message: "Duplicate event", eventKey });
       }
-      console.error("[Webhook] DB store error:", storeErr);
+      console.error("[Webhook] EventReceived store error:", storeErr);
     }
 
-    // Forward to Umami
+    // ── Try to find the matching pixel session (bridges browsing → purchase) ──
+    const pixelSessionId = await findPixelSessionForOrder(
+      db,
+      shopConfig.id,
+      orderId
+    );
+    if (pixelSessionId) {
+      console.log(`[Webhook] Linked to pixel session: ${pixelSessionId}`);
+    }
+
+    // ── Store to CustomerEvent (same table pixel events use) ──
+    const effectiveCustomerHash =
+      customerHash || (pixelSessionId ? hashSessionId(pixelSessionId) : null);
+
+    if (effectiveCustomerHash) {
+      try {
+        await db.customerEvent.create({
+          data: {
+            shopConfigId: shopConfig.id,
+            customerHash: effectiveCustomerHash,
+            sessionId: pixelSessionId || null,
+            eventType: eventName,
+            eventName:
+              eventName === "purchase"
+                ? "Purchase"
+                : eventName === "order_created"
+                  ? "Order Created"
+                  : eventName === "order_updated"
+                    ? "Order Updated"
+                    : eventName === "customer_created"
+                      ? "Customer Created"
+                      : eventName,
+            orderId: orderId || null,
+            value: totalPrice || null,
+            currency: currency || null,
+            itemsCount: itemsCount || null,
+            source: "webhook",
+            eventData: JSON.stringify({
+              order_number: payload.order_number,
+              financial_status: payload.financial_status,
+              payment_method: paymentMethod,
+            }),
+          },
+        });
+        console.log(
+          `[Webhook] Stored CustomerEvent for hash=${effectiveCustomerHash.substring(0, 8)}`
+        );
+      } catch (ceErr) {
+        console.error("[Webhook] CustomerEvent store error:", ceErr.message);
+      }
+
+      // ── Backfill customerHash on pixel events from the same session ──
+      // This links anonymous browsing events to the identified customer.
+      if (customerHash && pixelSessionId) {
+        try {
+          const updated = await db.customerEvent.updateMany({
+            where: {
+              shopConfigId: shopConfig.id,
+              sessionId: pixelSessionId,
+              customerHash: hashSessionId(pixelSessionId), // only update session-hashed ones
+            },
+            data: { customerHash },
+          });
+          if (updated.count > 0) {
+            console.log(
+              `[Webhook] Backfilled customerHash on ${updated.count} pixel events (session=${pixelSessionId})`
+            );
+          }
+        } catch (bfErr) {
+          console.error("[Webhook] Backfill error:", bfErr.message);
+        }
+      }
+    }
+
+    // ── Store/update OrderTracking (order lifecycle) ──
+    if (orderId && (topic === "orders/create" || topic === "orders/paid" || topic === "orders/updated")) {
+      try {
+        const isOnlinePayment =
+          paymentMethod &&
+          !paymentMethod.toLowerCase().includes("cod") &&
+          !paymentMethod.toLowerCase().includes("cash");
+        const status =
+          topic === "orders/paid"
+            ? "paid"
+            : topic === "orders/create"
+              ? "created"
+              : payload.cancelled_at
+                ? "cancelled"
+                : "updated";
+
+        await db.orderTracking.upsert({
+          where: {
+            shopConfigId_shopifyOrderId: {
+              shopConfigId: shopConfig.id,
+              shopifyOrderId: orderId,
+            },
+          },
+          update: {
+            status,
+            financialStatus: payload.financial_status || "pending",
+            fulfillmentStatus: payload.fulfillment_status || null,
+            paidAmount: topic === "orders/paid" ? (totalPrice || 0) : undefined,
+            paidAt: topic === "orders/paid" ? new Date() : undefined,
+            cancelledAt: payload.cancelled_at
+              ? new Date(payload.cancelled_at)
+              : undefined,
+          },
+          create: {
+            shopConfigId: shopConfig.id,
+            shopifyOrderId: orderId,
+            customerEmail: customerEmail || "unknown@unknown.com",
+            customerHash: customerHash || "unknown",
+            status,
+            financialStatus: payload.financial_status || "pending",
+            fulfillmentStatus: payload.fulfillment_status || null,
+            paymentMethod: isOnlinePayment ? "online_payment" : "cod",
+            paymentGateway: paymentMethod || null,
+            totalPrice: totalPrice || 0,
+            paidAmount: topic === "orders/paid" ? (totalPrice || 0) : 0,
+            currency,
+            lineItems: itemsCount,
+            paidAt: topic === "orders/paid" ? new Date() : null,
+          },
+        });
+        console.log(`[Webhook] Stored OrderTracking for order ${orderId}`);
+      } catch (otErr) {
+        console.error("[Webhook] OrderTracking store error:", otErr.message);
+      }
+    }
+
+    // ── Upsert CustomerProfile ──
+    if (effectiveCustomerHash) {
+      try {
+        const isPurchase = eventName === "purchase";
+        const existing = await db.customerProfile.findUnique({
+          where: {
+            shopConfigId_customerHash: {
+              shopConfigId: shopConfig.id,
+              customerHash: effectiveCustomerHash,
+            },
+          },
+        });
+
+        const totalOrderCount =
+          (existing?.totalOrderCount || 0) + (isPurchase ? 1 : 0);
+        const totalOrderValue =
+          (existing?.totalOrderValue || 0) +
+          (isPurchase ? totalPrice || 0 : 0);
+        const averageOrderValue =
+          totalOrderCount > 0 ? totalOrderValue / totalOrderCount : 0;
+
+        await db.customerProfile.upsert({
+          where: {
+            shopConfigId_customerHash: {
+              shopConfigId: shopConfig.id,
+              customerHash: effectiveCustomerHash,
+            },
+          },
+          update: {
+            lastActivityDate: new Date(),
+            totalOrderCount,
+            totalOrderValue,
+            averageOrderValue,
+            lifetimeValue: totalOrderValue,
+            ...(isPurchase
+              ? {
+                  lastOrderDate: new Date(),
+                  repeatCustomer: totalOrderCount > 1,
+                }
+              : {}),
+          },
+          create: {
+            shopConfigId: shopConfig.id,
+            customerHash: effectiveCustomerHash,
+            lastActivityDate: new Date(),
+            totalOrderCount,
+            totalOrderValue,
+            averageOrderValue,
+            lifetimeValue: totalOrderValue,
+            firstOrderDate: isPurchase ? new Date() : null,
+            lastOrderDate: isPurchase ? new Date() : null,
+            repeatCustomer: false,
+          },
+        });
+      } catch (cpErr) {
+        console.error("[Webhook] CustomerProfile upsert error:", cpErr.message);
+      }
+    }
+
+    // ── Upsert CustomerJourney summary ──
+    if (effectiveCustomerHash) {
+      try {
+        const isPurchase = eventName === "purchase";
+        const isOrderCreated = eventName === "order_created";
+        const isOnlinePay =
+          paymentMethod &&
+          !paymentMethod.toLowerCase().includes("cod") &&
+          !paymentMethod.toLowerCase().includes("cash");
+        const now = new Date();
+
+        await db.customerJourney.upsert({
+          where: {
+            shopConfigId_customerHash: {
+              shopConfigId: shopConfig.id,
+              customerHash: effectiveCustomerHash,
+            },
+          },
+          update: {
+            lastEventAt: now,
+            totalEvents: { increment: 1 },
+            ...(isPurchase
+              ? {
+                  purchaseCount: { increment: 1 },
+                  totalOrderValue: { increment: totalPrice || 0 },
+                  totalOrdersCompleted: { increment: 1 },
+                  frequency: { increment: 1 },
+                  monetaryValue: { increment: totalPrice || 0 },
+                  ...(isOnlinePay
+                    ? { onlinePaymentCount: { increment: 1 } }
+                    : { codPaymentCount: { increment: 1 } }),
+                }
+              : {}),
+          },
+          create: {
+            shopConfigId: shopConfig.id,
+            customerHash: effectiveCustomerHash,
+            firstEventAt: now,
+            lastEventAt: now,
+            totalEvents: 1,
+            purchaseCount: isPurchase ? 1 : 0,
+            totalOrderValue: isPurchase ? totalPrice || 0 : 0,
+            totalOrdersCompleted: isPurchase ? 1 : 0,
+            frequency: isPurchase ? 1 : 0,
+            monetaryValue: isPurchase ? totalPrice || 0 : 0,
+            onlinePaymentCount:
+              isPurchase && isOnlinePay ? 1 : 0,
+            codPaymentCount:
+              isPurchase && !isOnlinePay ? 1 : 0,
+          },
+        });
+      } catch (cjErr) {
+        console.error("[Webhook] CustomerJourney upsert error:", cjErr.message);
+      }
+    }
+
+    // ── Forward to Umami ──
     const umamiEndpoint =
       shopConfig.umamiEndpoint || process.env.UMAMI_ENDPOINT;
     const umamiWebsiteId = shopConfig.brand?.umamiWebsiteUuid;
     let forwarded = false;
 
-    if (umamiEndpoint && umamiWebsiteId) {
+    if (
+      umamiEndpoint &&
+      umamiWebsiteId &&
+      !umamiWebsiteId.startsWith("auto-")
+    ) {
       try {
-        // Build Umami event data with order details
         const eventData = {
           event_type: eventType,
           order_id: orderId,
@@ -406,14 +765,10 @@ async function handleShopifyWebhook(req, res, rawBody) {
           source: "webhook",
         };
 
-        // Add customer hash (not PII)
-        if (customerHash) {
-          eventData.customer_id = customerHash;
-        }
+        if (customerHash) eventData.customer_id = customerHash;
 
-        // Add line item summaries for purchase events
         if (
-          topic === "orders/paid" &&
+          (topic === "orders/paid" || topic === "orders/create") &&
           payload.line_items?.length > 0
         ) {
           eventData.products = payload.line_items
@@ -422,14 +777,30 @@ async function handleShopifyWebhook(req, res, rawBody) {
             .join(", ");
         }
 
+        // CRITICAL: Include revenue + currency for Umami revenue tracking
+        if (totalPrice && totalPrice > 0) {
+          eventData.revenue = totalPrice;
+          eventData.currency = currency;
+        }
+
+        // Resolve custom hostname for Umami
+        let storeHostname = shop.replace(".myshopify.com", "");
+        try {
+          const brandDomains = JSON.parse(shopConfig.brand?.domains || "[]");
+          const customDomain = brandDomains.find(
+            (d) => !d.includes("myshopify.com")
+          );
+          if (customDomain) storeHostname = customDomain;
+        } catch { /* ignore */ }
+
         const umamiBody = {
           type: "event",
           payload: {
             website: umamiWebsiteId,
-            hostname: shop.replace(".myshopify.com", ".com"),
+            hostname: storeHostname,
             url: `/orders/${payload.order_number || orderId}`,
             referrer: "",
-            title: `${eventName} - Order #${payload.order_number || orderId}`,
+            title: `Order #${payload.order_number || orderId}`,
             language: "en-US",
             screen: "1920x1080",
             name: eventName,
@@ -438,7 +809,7 @@ async function handleShopifyWebhook(req, res, rawBody) {
         };
 
         console.log(
-          `[Webhook] Forwarding ${eventName} to Umami: ${umamiEndpoint}`
+          `[Webhook] Forwarding ${eventName} to Umami (revenue=${totalPrice} ${currency})`
         );
 
         const umamiResp = await fetch(umamiEndpoint, {
@@ -457,7 +828,6 @@ async function handleShopifyWebhook(req, res, rawBody) {
 
         forwarded = umamiResp.ok;
 
-        // Update DB record
         try {
           await db.eventReceived.update({
             where: { eventKey },
@@ -474,7 +844,7 @@ async function handleShopifyWebhook(req, res, rawBody) {
       }
     }
 
-    // Log health status
+    // ── Log health status ──
     try {
       await db.healthLog.create({
         data: {
@@ -488,6 +858,7 @@ async function handleShopifyWebhook(req, res, rawBody) {
             value: totalPrice,
             currency,
             forwarded,
+            pixelSessionLinked: !!pixelSessionId,
           }),
         },
       });
@@ -500,6 +871,7 @@ async function handleShopifyWebhook(req, res, rawBody) {
       eventKey,
       forwarded,
       event: eventName,
+      pixelSessionLinked: !!pixelSessionId,
     });
   } catch (err) {
     console.error("[Webhook] Handler error:", err);
