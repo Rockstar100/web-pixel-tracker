@@ -144,8 +144,6 @@ async function handlePixelRequest(request: Request, corsHeaders: Headers) {
 
     normalizedEvent = privacyCheckedEvent;
 
-    await CustomerJourneyService.recordEvent(normalizedEvent, shopConfig.id);
-
     // Check for duplicates
     const dedupeResult = await EventDeduplicator.checkAndStore(
       normalizedEvent,
@@ -175,6 +173,8 @@ async function handlePixelRequest(request: Request, corsHeaders: Headers) {
 
     // Enrich with stored attribution
     const enrichedEvent = await AttributionTracker.enrichEvent(normalizedEvent);
+
+    await CustomerJourneyService.recordEvent(enrichedEvent, shopConfig.id);
 
     // Forward to Umami
     const forwardResult = await UmamiForwarder.forward(

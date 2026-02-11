@@ -43,8 +43,17 @@ export class EventNormalizer {
     const sessionHash = !emailHash && sessionId
       ? this.hashSessionId(sessionId)
       : undefined;
-    const customerHash = emailHash || sessionHash;
-    const customerIdentity = emailHash ? 'email' : sessionHash ? 'session' : undefined;
+    const fallbackHash = !emailHash && !sessionHash
+      ? this.hashFallback(pixelEvent.id || pixelEvent.timestamp)
+      : undefined;
+    const customerHash = emailHash || sessionHash || fallbackHash;
+    const customerIdentity = emailHash
+      ? 'email'
+      : sessionHash
+        ? 'session'
+        : fallbackHash
+          ? 'session'
+          : undefined;
 
     // Extract order/checkout data
     const orderId = data.checkout?.order?.id || data.order_id;
@@ -226,6 +235,13 @@ export class EventNormalizer {
     return crypto
       .createHash('sha256')
       .update(`session:${sessionId}`)
+      .digest('hex');
+  }
+
+  private static hashFallback(value: string): string {
+    return crypto
+      .createHash('sha256')
+      .update(`fallback:${value}`)
       .digest('hex');
   }
 

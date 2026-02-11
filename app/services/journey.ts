@@ -24,7 +24,7 @@ export class CustomerJourneyService {
 
     try {
       // Insert the event into customer event stream
-      await prisma.customerEvent.create({
+      const createdEvent = await prisma.customerEvent.create({
         data: {
           shopConfigId,
           customerHash,
@@ -51,6 +51,9 @@ export class CustomerJourneyService {
         }
       });
 
+      await this.updateCustomerProfile(event, shopConfigId, customerHash);
+      await this.linkEventAttribution(createdEvent.id, shopConfigId, customerHash);
+
       // Update or create customer journey summary
       await this.updateJourneySummary(
         customerHash,
@@ -60,6 +63,82 @@ export class CustomerJourneyService {
     } catch (error) {
       console.error('Failed to record customer event:', error);
     }
+  }
+
+  private static async updateCustomerProfile(
+    event: NormalizedEvent,
+    shopConfigId: string,
+    customerHash: string
+  ): Promise<void> {
+    const isPurchase = event.name.includes('purchase');
+    const existing = await prisma.customerProfile.findUnique({
+      where: {
+        shopConfigId_customerHash: {
+          shopConfigId,
+          customerHash
+        }
+      }
+    });
+
+    const totalOrderCount = (existing?.totalOrderCount || 0) + (isPurchase ? 1 : 0);
+    const totalOrderValue = (existing?.totalOrderValue || 0) + (isPurchase ? (event.value || 0) : 0);
+    const averageOrderValue = totalOrderCount > 0 ? totalOrderValue / totalOrderCount : 0;
+
+    await prisma.customerProfile.upsert({
+      where: {
+        shopConfigId_customerHash: {
+          shopConfigId,
+          customerHash
+        }
+      },
+      update: {
+        lastActivityDate: event.timestamp,
+        totalOrderCount,
+        totalOrderValue,
+        averageOrderValue,
+        firstOrderDate: existing?.firstOrderDate || (isPurchase ? event.timestamp : null),
+        lastOrderDate: isPurchase ? event.timestamp : existing?.lastOrderDate || null,
+        repeatCustomer: totalOrderCount > 1,
+        lifetimeValue: totalOrderValue
+      },
+      create: {
+        shopConfigId,
+        customerHash,
+        lastActivityDate: event.timestamp,
+        totalOrderCount,
+        totalOrderValue,
+        averageOrderValue,
+        firstOrderDate: isPurchase ? event.timestamp : null,
+        lastOrderDate: isPurchase ? event.timestamp : null,
+        repeatCustomer: totalOrderCount > 1,
+        lifetimeValue: totalOrderValue
+      }
+    });
+  }
+
+  private static async linkEventAttribution(
+    eventId: string,
+    shopConfigId: string,
+    customerHash: string
+  ): Promise<void> {
+    const latestTouch = await prisma.multiTouchAttribution.findFirst({
+      where: { shopConfigId, customerHash },
+      orderBy: { touchAt: 'desc' }
+    });
+
+    if (!latestTouch) {
+      return;
+    }
+
+    await prisma.customerEventAttribution.create({
+      data: {
+        shopConfigId,
+        eventId,
+        attributionId: latestTouch.id,
+        touchPosition: latestTouch.touchPosition,
+        attributionWeight: latestTouch.attributionWeight
+      }
+    });
   }
 
   /**

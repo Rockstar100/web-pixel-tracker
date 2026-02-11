@@ -82,6 +82,8 @@ model ShopConfig {
   orderTracking       OrderTracking[]
   customerEvents      CustomerEvent[]
   customerJourneys    CustomerJourney[]
+  customerProfiles    CustomerProfile[]
+  customerEventAttributions CustomerEventAttribution[]
   dataRetentionPolicies DataRetentionPolicy[]
   customerSegments    CustomerSegment[]
 }
@@ -184,6 +186,8 @@ model MultiTouchAttribution {
   timeToConversion    Int?          // Days from this touch to conversion
   
   createdAt           DateTime      @default(now())
+
+  eventAttributions   CustomerEventAttribution[]
   
   @@index([customerHash, orderId])
   @@index([channel, touchAt])
@@ -358,6 +362,8 @@ model CustomerEvent {
   
   // Umami sync status
   forwardedToUmami    Boolean       @default(false)
+
+  eventAttributions   CustomerEventAttribution[]
   
   @@index([customerHash, timestamp])
   @@index([sessionId, timestamp])
@@ -367,6 +373,57 @@ model CustomerEvent {
   @@index([timestamp])
   @@index([country])
   @@index([deviceType])
+}
+
+// Customer profile (lightweight, derived profile data)
+model CustomerProfile {
+  id                  String        @id @default(uuid())
+  shopConfigId        String
+  shopConfig          ShopConfig    @relation(fields: [shopConfigId], references: [id], onDelete: Cascade)
+
+  customerHash        String
+  email               String?
+  phone               String?
+  firstName           String?
+  lastName            String?
+  country             String?
+  state               String?
+  city                String?
+  zipCode             String?
+
+  lastActivityDate    DateTime?
+  totalOrderCount     Int           @default(0)
+  totalOrderValue     Float         @default(0)
+  averageOrderValue   Float         @default(0)
+  firstOrderDate      DateTime?
+  lastOrderDate       DateTime?
+  repeatCustomer      Boolean       @default(false)
+  lifetimeValue       Float         @default(0)
+
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+
+  @@unique([shopConfigId, customerHash])
+}
+
+// Link customer events to attribution touches
+model CustomerEventAttribution {
+  id                  String        @id @default(uuid())
+  shopConfigId        String
+  shopConfig          ShopConfig    @relation(fields: [shopConfigId], references: [id], onDelete: Cascade)
+
+  eventId             String
+  event               CustomerEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  attributionId       String
+  attribution         MultiTouchAttribution @relation(fields: [attributionId], references: [id], onDelete: Cascade)
+
+  touchPosition       Int?
+  attributionWeight   Float         @default(0)
+  createdAt           DateTime      @default(now())
+
+  @@index([eventId])
+  @@index([attributionId])
 }
 
 // Customer journey summary (for quick lookups)
