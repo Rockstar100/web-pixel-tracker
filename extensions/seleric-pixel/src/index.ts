@@ -110,7 +110,8 @@ register(({ analytics, browser, settings, init }) => {
    */
   function initSession() {
     try {
-      sessionId = browser.localStorage.getItem('_seleric_sid');
+      const stored = browser.localStorage.getItem('_seleric_sid');
+      sessionId = typeof stored === 'string' && stored.trim().length > 0 ? stored : null;
       if (!sessionId) {
         sessionId = generateSessionId();
         browser.localStorage.setItem('_seleric_sid', sessionId);
@@ -166,6 +167,14 @@ register(({ analytics, browser, settings, init }) => {
     eventData: PixelEventData | undefined,
     context: PixelContext
   ) {
+    if (!sessionId || typeof sessionId !== 'string') {
+      sessionId = generateSessionId();
+      try {
+        browser.localStorage.setItem('_seleric_sid', sessionId);
+      } catch {
+        // ignore storage errors
+      }
+    }
     const shopDomain = resolveShopDomain(context);
     const serverEndpoint = normalizeServerEndpoint(config.serverEndpoint);
 
