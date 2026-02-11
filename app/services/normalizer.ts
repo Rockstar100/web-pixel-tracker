@@ -36,9 +36,15 @@ export class EventNormalizer {
     const normalizedName = this.mapPixelEventName(eventName);
 
     // Extract customer data if available
-    const customerHash = data.customer?.email 
+    const emailHash = data.customer?.email
       ? this.hashEmail(data.customer.email)
       : undefined;
+    const sessionId = pixelEvent.clientId ? String(pixelEvent.clientId) : undefined;
+    const sessionHash = !emailHash && sessionId
+      ? this.hashSessionId(sessionId)
+      : undefined;
+    const customerHash = emailHash || sessionHash;
+    const customerIdentity = emailHash ? 'email' : sessionHash ? 'session' : undefined;
 
     // Extract order/checkout data
     const orderId = data.checkout?.order?.id || data.order_id;
@@ -62,7 +68,9 @@ export class EventNormalizer {
       hostname,
       utm,
       customerHash,
-      sessionId: pixelEvent.clientId,
+      sessionId,
+      customerIdentity,
+      isAnonymous: customerIdentity === 'session',
       orderId: orderId ? String(orderId) : undefined,
       checkoutId: checkoutId ? String(checkoutId) : undefined,
       value: value ? parseFloat(value) : undefined,
@@ -211,6 +219,13 @@ export class EventNormalizer {
     return crypto
       .createHash('sha256')
       .update(email.toLowerCase().trim())
+      .digest('hex');
+  }
+
+  private static hashSessionId(sessionId: string): string {
+    return crypto
+      .createHash('sha256')
+      .update(`session:${sessionId}`)
       .digest('hex');
   }
 

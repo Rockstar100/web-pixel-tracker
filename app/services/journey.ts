@@ -16,8 +16,9 @@ export class CustomerJourneyService {
     event: NormalizedEvent,
     shopConfigId: string
   ): Promise<void> {
-    if (!event.customerHash) {
-      console.warn('Event missing customerHash, skipping journey tracking');
+    const customerHash = event.customerHash || (event.sessionId ? this.hashSessionId(event.sessionId) : null);
+    if (!customerHash) {
+      console.warn('Event missing customer identity, skipping journey tracking');
       return;
     }
 
@@ -26,7 +27,7 @@ export class CustomerJourneyService {
       await prisma.customerEvent.create({
         data: {
           shopConfigId,
-          customerHash: event.customerHash,
+          customerHash,
           sessionId: event.sessionId,
           eventType: event.name,
           eventName: this.getEventDisplayName(event.name),
@@ -45,13 +46,14 @@ export class CustomerJourneyService {
           itemsCount: event.itemsCount,
           source: event.source,
           eventData: event.data ? JSON.stringify(event.data) : null,
+          isAnonymous: event.isAnonymous ?? event.customerIdentity === 'session',
           timestamp: event.timestamp
         }
       });
 
       // Update or create customer journey summary
       await this.updateJourneySummary(
-        event.customerHash,
+        customerHash,
         shopConfigId,
         event
       );
@@ -140,6 +142,12 @@ export class CustomerJourneyService {
       0
     );
 
+    const rScore = this.scoreRecency(recency ?? 9999);
+    const fScore = this.scoreFrequency(frequency);
+    const mScore = this.scoreMonetary(monetaryValue);
+    const rfmScore = `${rScore}-${fScore}-${mScore}`;
+    const rfmSegment = this.determineRfmSegment(rScore, fScore, mScore);
+
     // Approximate totalSessions by counting distinct non-null sessionIds
     const distinctSessions = new Set(
       events
@@ -170,6 +178,8 @@ export class CustomerJourneyService {
           recency,
           frequency,
           monetaryValue,
+          rfmScore,
+          rfmSegment,
           daysAsCustomer,
           lastTouchSource: lastEvent.utmSource,
           lastTouchMedium: lastEvent.utmMedium,
@@ -196,6 +206,8 @@ export class CustomerJourneyService {
           recency,
           frequency,
           monetaryValue,
+          rfmScore,
+          rfmSegment,
           daysAsCustomer,
           firstTouchSource: firstEvent.utmSource,
           firstTouchMedium: firstEvent.utmMedium,
@@ -207,6 +219,89 @@ export class CustomerJourneyService {
         }
       });
     }
+
+    await this.updateSegmentCounts(shopConfigId);
+  }
+
+  private static scoreRecency(recencyDays: number): number {
+    if (recencyDays <= 30) return 5;
+    if (recencyDays <= 60) return 4;
+    if (recencyDays <= 120) return 3;
+    if (recencyDays <= 240) return 2;
+    return 1;
+  }
+
+  private static scoreFrequency(frequency: number): number {
+    if (frequency >= 10) return 5;
+    if (frequency >= 6) return 4;
+    if (frequency >= 3) return 3;
+    if (frequency >= 2) return 2;
+    return 1;
+  }
+
+  private static scoreMonetary(monetary: number): number {
+    if (monetary >= 10000) return 5;
+    if (monetary >= 5000) return 4;
+    if (monetary >= 1000) return 3;
+    if (monetary >= 100) return 2;
+    return 1;
+  }
+
+  private static determineRfmSegment(rScore: number, fScore: number, mScore: number): string {
+    if (rScore >= 4 && fScore >= 4 && mScore >= 4) return 'VIP';
+    if (rScore >= 3 && fScore >= 3) return 'Loyal';
+    if (mScore >= 4 && fScore >= 2) return 'HighValue';
+    if (rScore >= 4 && mScore >= 3) return 'Potential';
+    if (rScore <= 2 && fScore >= 3 && mScore >= 3) return 'AtRisk';
+    if (rScore <= 2 && mScore >= 4) return 'LostHighValue';
+    if (rScore >= 4 && fScore <= 1) return 'New';
+    if (rScore <= 1) return 'Churned';
+    return 'Standard';
+  }
+
+  private static async updateSegmentCounts(shopConfigId: string): Promise<void> {
+    const now = new Date();
+    const segments = await prisma.customerJourney.groupBy({
+      by: ['rfmSegment'],
+      where: { shopConfigId },
+      _count: { rfmSegment: true }
+    });
+
+    await Promise.all(
+      segments.map((segment) =>
+        prisma.customerSegment.upsert({
+          where: {
+            shopConfigId_name: {
+              shopConfigId,
+              name: segment.rfmSegment || 'Standard'
+            }
+          },
+          update: {
+            segmentType: 'rfm',
+            criteria: JSON.stringify({ rfmSegment: segment.rfmSegment || 'Standard' }),
+            totalCount: segment._count.rfmSegment,
+            lastUpdatedAt: now,
+            enabled: true
+          },
+          create: {
+            shopConfigId,
+            name: segment.rfmSegment || 'Standard',
+            description: 'Auto-generated RFM segment',
+            segmentType: 'rfm',
+            criteria: JSON.stringify({ rfmSegment: segment.rfmSegment || 'Standard' }),
+            totalCount: segment._count.rfmSegment,
+            lastUpdatedAt: now,
+            enabled: true,
+            priority: 0
+          }
+        })
+      )
+    );
+  }
+
+  private static hashSessionId(sessionId: string): string {
+    const crypto = require('crypto');
+    return crypto.createHash('sha256').update(`session:${sessionId}`).digest('hex');
   }
 
   /**

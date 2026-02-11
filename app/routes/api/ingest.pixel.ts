@@ -4,6 +4,7 @@ import { EventDeduplicator } from "../../services/deduplicator";
 import { UmamiForwarder } from "../../services/umami-forwarder";
 import { AttributionTracker } from "../../services/attribution";
 import { PrivacyManager } from "../../services/privacy";
+import { CustomerJourneyService } from "../../services/journey";
 import type { PixelEvent, ShopConfigData } from "../../services/types";
 
 const prisma = new PrismaClient();
@@ -18,7 +19,7 @@ function getCorsHeaders(request: Request): Headers {
   const origin = request.headers.get("Origin") || "*";
   return new Headers({
     "Access-Control-Allow-Origin": origin,
-    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, X-Shopify-Shop-Domain",
   });
 }
@@ -28,11 +29,16 @@ function getCorsHeaders(request: Request): Headers {
  */
 export async function loader({ request }: ActionArgs) {
   const corsHeaders = getCorsHeaders(request);
-  // CORS preflight
-  return new Response(null, {
-    status: 204,
-    headers: corsHeaders,
-  });
+
+  if (request.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: corsHeaders });
+  }
+
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    return new Response(null, { status: 204, headers: corsHeaders });
+  }
+
+  return handlePixelRequest(request, corsHeaders);
 }
 
 /**
@@ -42,12 +48,8 @@ export async function loader({ request }: ActionArgs) {
 export async function action({ request }: ActionArgs) {
   const corsHeaders = getCorsHeaders(request);
 
-  // Handle CORS preflight
   if (request.method === "OPTIONS") {
-    return new Response(null, {
-      status: 204,
-      headers: corsHeaders,
-    });
+    return new Response(null, { status: 204, headers: corsHeaders });
   }
 
   if (request.method !== "POST") {
@@ -57,8 +59,25 @@ export async function action({ request }: ActionArgs) {
     );
   }
 
+  return handlePixelRequest(request, corsHeaders);
+}
+
+async function parsePixelEvent(request: Request): Promise<PixelEvent> {
+  if (request.method === "GET" || request.method === "HEAD") {
+    const url = new URL(request.url);
+    const dataParam = url.searchParams.get("data");
+    if (!dataParam) {
+      throw new Error("Missing data parameter");
+    }
+    return JSON.parse(dataParam) as PixelEvent;
+  }
+
+  return (await request.json()) as PixelEvent;
+}
+
+async function handlePixelRequest(request: Request, corsHeaders: Headers) {
   try {
-    const pixelEvent: PixelEvent = await request.json();
+    const pixelEvent = await parsePixelEvent(request);
 
     // Extract shop from request (could be from subdomain or header)
     const shop = request.headers.get("X-Shopify-Shop-Domain") ||
@@ -125,6 +144,8 @@ export async function action({ request }: ActionArgs) {
 
     normalizedEvent = privacyCheckedEvent;
 
+    await CustomerJourneyService.recordEvent(normalizedEvent, shopConfig.id);
+
     // Check for duplicates
     const dedupeResult = await EventDeduplicator.checkAndStore(
       normalizedEvent,
@@ -141,13 +162,13 @@ export async function action({ request }: ActionArgs) {
       );
     }
 
-    // Capture attribution if it's a page view with UTM params
-    if (normalizedEvent.name === 'page_view' && normalizedEvent.utm) {
-      const isFirstTouch = !await prisma.attribution.findFirst({
-        where: { 
-          sessionId: normalizedEvent.sessionId 
-        }
-      });
+    // Capture attribution for any event with UTM/referrer
+    if (normalizedEvent.utm || normalizedEvent.referrer) {
+      const isFirstTouch = normalizedEvent.sessionId
+        ? !await prisma.attribution.findFirst({
+            where: { sessionId: normalizedEvent.sessionId }
+          })
+        : false;
 
       await AttributionTracker.capture(normalizedEvent, shopConfig.id, isFirstTouch);
     }
@@ -179,7 +200,7 @@ export async function action({ request }: ActionArgs) {
 
   } catch (error) {
     console.error("Pixel ingestion error:", error);
-    
+
     return Response.json(
       {
         error: "Internal server error",

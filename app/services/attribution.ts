@@ -1,4 +1,5 @@
 import type { NormalizedEvent } from './types';
+import crypto from 'crypto';
 import { PrismaClient } from '@prisma/client';
 
 const prisma = new PrismaClient();
@@ -39,9 +40,101 @@ export class AttributionTracker {
           capturedAt: event.timestamp
         }
       });
+
+      await this.captureMultiTouch(event, shopConfigId);
     } catch (error) {
       console.error('Failed to capture attribution:', error);
     }
+  }
+
+  private static deriveAttributionIdentity(event: NormalizedEvent): string | null {
+    if (event.customerHash) {
+      return event.customerHash;
+    }
+
+    if (event.sessionId) {
+      return this.hashValue(`session:${event.sessionId}`);
+    }
+
+    return null;
+  }
+
+  private static hashValue(value: string): string {
+    return crypto.createHash('sha256').update(value).digest('hex');
+  }
+
+  private static deriveChannel(event: NormalizedEvent): {
+    channel: string;
+    source: string;
+    medium?: string;
+    campaign?: string;
+    content?: string;
+  } {
+    const source = event.utm?.source || 'direct';
+    const medium = event.utm?.medium || undefined;
+    const campaign = event.utm?.campaign || undefined;
+    const content = event.utm?.content || undefined;
+
+    const mediumLower = medium?.toLowerCase() || '';
+    const sourceLower = source.toLowerCase();
+
+    let channel = 'direct';
+
+    if (mediumLower.includes('email') || sourceLower.includes('mail')) {
+      channel = 'email';
+    } else if (mediumLower.includes('cpc') || mediumLower.includes('ppc') || mediumLower.includes('paid')) {
+      channel = 'paid_search';
+    } else if (
+      mediumLower.includes('social') ||
+      ['facebook', 'instagram', 'tiktok', 'twitter', 'linkedin', 'youtube', 'pinterest'].includes(sourceLower)
+    ) {
+      channel = 'social';
+    } else if (mediumLower.includes('affiliate')) {
+      channel = 'affiliate';
+    } else if (event.referrer && source === 'direct') {
+      channel = 'referral';
+    } else if (mediumLower.includes('organic')) {
+      channel = 'organic';
+    }
+
+    return { channel, source, medium, campaign, content };
+  }
+
+  private static async captureMultiTouch(
+    event: NormalizedEvent,
+    shopConfigId: string
+  ): Promise<void> {
+    const attributionIdentity = this.deriveAttributionIdentity(event);
+    if (!attributionIdentity) {
+      return;
+    }
+
+    const { channel, source, medium, campaign, content } = this.deriveChannel(event);
+
+    const existingCount = await prisma.multiTouchAttribution.count({
+      where: {
+        shopConfigId,
+        customerHash: attributionIdentity
+      }
+    });
+
+    await prisma.multiTouchAttribution.create({
+      data: {
+        shopConfigId,
+        customerHash: attributionIdentity,
+        orderId: event.orderId || null,
+        touchPosition: existingCount + 1,
+        touchType: event.name === 'page_view' ? 'view' : 'interaction',
+        channel,
+        source,
+        medium,
+        campaign,
+        content,
+        attributionWeight: 0.0,
+        attributionModel: 'last_click',
+        touchAt: event.timestamp
+      }
+    });
   }
 
   /**

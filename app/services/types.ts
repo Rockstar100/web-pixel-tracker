@@ -26,6 +26,8 @@ export interface NormalizedEvent {
   // Customer identity (hashed)
   customerHash?: string;
   sessionId?: string;
+  customerIdentity?: 'email' | 'session';
+  isAnonymous?: boolean;
   
   // Order/transaction data
   orderId?: string;

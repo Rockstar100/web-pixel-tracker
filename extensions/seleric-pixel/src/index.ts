@@ -110,12 +110,10 @@ register(({ analytics, browser, settings, init }) => {
    */
   function initSession() {
     try {
-      sessionId = browser.cookie.get('_seleric_sid');
+      sessionId = browser.localStorage.getItem('_seleric_sid');
       if (!sessionId) {
         sessionId = generateSessionId();
-        browser.cookie.set('_seleric_sid', sessionId, {
-          expires: 1800 // 30 minutes
-        });
+        browser.localStorage.setItem('_seleric_sid', sessionId);
       }
     } catch (error) {
       console.error('[Seleric] Failed to init session:', error);
@@ -207,14 +205,11 @@ register(({ analytics, browser, settings, init }) => {
     }
 
     try {
-      await fetch(serverEndpoint, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(shopDomain ? { 'X-Shopify-Shop-Domain': shopDomain } : {}),
-        },
-        body: JSON.stringify(payload),
-        keepalive: true, // Important for events sent during page unload
+      const beaconUrl = `${serverEndpoint}?data=${encodeURIComponent(JSON.stringify(payload))}`;
+      await fetch(beaconUrl, {
+        method: 'GET',
+        mode: 'no-cors',
+        keepalive: true,
       });
     } catch (error) {
       console.error('[Seleric] Failed to send event:', error);
