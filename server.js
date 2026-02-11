@@ -145,7 +145,31 @@ async function handlePixelIngestion(req, res) {
       pixelEvent.id || Date.now()
     }`;
 
-    // Store event
+    // Extract pixel context
+    const sessionId = pixelEvent.clientId || null;
+    const pageUrl = pixelEvent.context?.document?.location?.pathname || "/";
+    const pageTitle = pixelEvent.context?.document?.title || "";
+    const referrer = pixelEvent.context?.document?.referrer || "";
+    const urlSearch = pixelEvent.context?.document?.location?.search || "";
+
+    // Extract checkout/order data for conversion events
+    const checkout = pixelEvent.data?.checkout;
+    const pixelOrderId = checkout?.order?.id
+      ? String(checkout.order.id)
+      : pixelEvent.data?.order_id
+        ? String(pixelEvent.data.order_id)
+        : null;
+    const pixelValue = checkout?.totalPrice?.amount
+      ? parseFloat(checkout.totalPrice.amount)
+      : pixelEvent.data?.total_price
+        ? parseFloat(pixelEvent.data.total_price)
+        : null;
+    const pixelCurrency =
+      checkout?.currencyCode ||
+      shopConfig.brand?.defaultCurrency ||
+      "INR";
+
+    // Store event in EventReceived (dedup log)
     try {
       await db.eventReceived.create({
         data: {
@@ -157,6 +181,7 @@ async function handlePixelIngestion(req, res) {
               : pixelEvent.name,
           eventSource: "pixel",
           eventName: pixelEvent.name,
+          shopifyOrderId: pixelOrderId || undefined,
           eventData: JSON.stringify(pixelEvent.data || {}),
           forwardedToUmami: false,
         },
@@ -170,6 +195,154 @@ async function handlePixelIngestion(req, res) {
           .json({ message: "Duplicate event", eventKey });
       }
       console.error("[Pixel] DB store error:", storeErr);
+    }
+
+    // ── Store to CustomerEvent (same table the React Router route uses) ──
+    const customerHash = sessionId ? hashSessionId(sessionId) : null;
+    if (customerHash) {
+      try {
+        await db.customerEvent.create({
+          data: {
+            shopConfigId: shopConfig.id,
+            customerHash,
+            sessionId,
+            eventType: pixelEvent.name,
+            eventName:
+              pixelEvent.name === "page_viewed"
+                ? "Page View"
+                : pixelEvent.name === "product_viewed"
+                  ? "Product Viewed"
+                  : pixelEvent.name === "product_added_to_cart"
+                    ? "Added to Cart"
+                    : pixelEvent.name === "checkout_started"
+                      ? "Checkout Started"
+                      : pixelEvent.name === "checkout_completed"
+                        ? "Checkout Completed"
+                        : pixelEvent.name,
+            pageUrl,
+            pageTitle: pageTitle || null,
+            pageReferrer: referrer || null,
+            orderId: pixelOrderId || null,
+            checkoutId: checkout?.token || null,
+            value: pixelValue || null,
+            currency: pixelValue ? pixelCurrency : null,
+            itemsCount: checkout?.lineItems?.length || null,
+            source: "pixel",
+            eventData: JSON.stringify(pixelEvent.data || {}),
+          },
+        });
+      } catch (ceErr) {
+        console.error("[Pixel] CustomerEvent store error:", ceErr.message);
+      }
+
+      // ── Upsert CustomerProfile ──
+      try {
+        const isPurchase = pixelEvent.name === "checkout_completed";
+        const existing = await db.customerProfile.findUnique({
+          where: {
+            shopConfigId_customerHash: {
+              shopConfigId: shopConfig.id,
+              customerHash,
+            },
+          },
+        });
+
+        const totalOrderCount =
+          (existing?.totalOrderCount || 0) + (isPurchase ? 1 : 0);
+        const totalOrderValue =
+          (existing?.totalOrderValue || 0) +
+          (isPurchase ? pixelValue || 0 : 0);
+        const averageOrderValue =
+          totalOrderCount > 0 ? totalOrderValue / totalOrderCount : 0;
+
+        await db.customerProfile.upsert({
+          where: {
+            shopConfigId_customerHash: {
+              shopConfigId: shopConfig.id,
+              customerHash,
+            },
+          },
+          update: {
+            lastActivityDate: new Date(),
+            ...(isPurchase
+              ? {
+                  totalOrderCount,
+                  totalOrderValue,
+                  averageOrderValue,
+                  lifetimeValue: totalOrderValue,
+                  lastOrderDate: new Date(),
+                  repeatCustomer: totalOrderCount > 1,
+                }
+              : {}),
+          },
+          create: {
+            shopConfigId: shopConfig.id,
+            customerHash,
+            lastActivityDate: new Date(),
+            totalOrderCount,
+            totalOrderValue,
+            averageOrderValue,
+            lifetimeValue: totalOrderValue,
+            firstOrderDate: isPurchase ? new Date() : null,
+            lastOrderDate: isPurchase ? new Date() : null,
+          },
+        });
+      } catch (cpErr) {
+        console.error("[Pixel] CustomerProfile upsert error:", cpErr.message);
+      }
+
+      // ── Upsert CustomerJourney ──
+      try {
+        const now = new Date();
+        const isPageView = pixelEvent.name === "page_viewed";
+        const isAddToCart = pixelEvent.name === "product_added_to_cart";
+        const isCheckoutStart = pixelEvent.name === "checkout_started";
+        const isPurchase = pixelEvent.name === "checkout_completed";
+
+        await db.customerJourney.upsert({
+          where: {
+            shopConfigId_customerHash: {
+              shopConfigId: shopConfig.id,
+              customerHash,
+            },
+          },
+          update: {
+            lastEventAt: now,
+            totalEvents: { increment: 1 },
+            ...(isPageView ? { pageViewCount: { increment: 1 } } : {}),
+            ...(isAddToCart ? { addToCartCount: { increment: 1 } } : {}),
+            ...(isCheckoutStart
+              ? { beginCheckoutCount: { increment: 1 } }
+              : {}),
+            ...(isPurchase
+              ? {
+                  purchaseCount: { increment: 1 },
+                  totalOrderValue: { increment: pixelValue || 0 },
+                  totalOrdersCompleted: { increment: 1 },
+                  frequency: { increment: 1 },
+                  monetaryValue: { increment: pixelValue || 0 },
+                }
+              : {}),
+          },
+          create: {
+            shopConfigId: shopConfig.id,
+            customerHash,
+            firstEventAt: now,
+            lastEventAt: now,
+            totalEvents: 1,
+            pageViewCount: isPageView ? 1 : 0,
+            addToCartCount: isAddToCart ? 1 : 0,
+            beginCheckoutCount: isCheckoutStart ? 1 : 0,
+            purchaseCount: isPurchase ? 1 : 0,
+            totalOrderValue: isPurchase ? pixelValue || 0 : 0,
+            totalOrdersCompleted: isPurchase ? 1 : 0,
+            frequency: isPurchase ? 1 : 0,
+            monetaryValue: isPurchase ? pixelValue || 0 : 0,
+          },
+        });
+      } catch (cjErr) {
+        console.error("[Pixel] CustomerJourney upsert error:", cjErr.message);
+      }
     }
 
     // Forward to Umami
