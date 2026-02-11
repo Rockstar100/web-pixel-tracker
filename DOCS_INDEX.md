@@ -5,7 +5,6 @@
 Welcome to the Seleric Tracker documentation! This index helps you find the right document for your needs.
 
 ---
-
 ## 🚀 Quick Start
 
 **New to Razorpay Magic Checkout?**
