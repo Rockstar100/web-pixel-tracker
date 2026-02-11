@@ -29,8 +29,9 @@ export class EventNormalizer {
     const title = context.document?.title || '';
     const hostname = context.document?.location?.hostname || '';
 
-    // Parse UTM parameters
+    // Parse UTM parameters and ad platform click IDs
     const utm = this.extractUtmParams(url);
+    const clickIds = this.extractClickIds(url);
 
     // Map Shopify pixel event names to normalized event names
     const normalizedName = this.mapPixelEventName(eventName);
@@ -76,6 +77,7 @@ export class EventNormalizer {
       title,
       hostname,
       utm,
+      clickIds,
       customerHash,
       sessionId,
       customerIdentity,
@@ -204,17 +206,45 @@ export class EventNormalizer {
   /**
    * Extract UTM parameters from URL
    */
-  private static extractUtmParams(url: string): NormalizedEvent['utm'] {
+  private static extractUtmParams(url: string): NormalizedEvent["utm"] {
     try {
       const urlObj = new URL(url);
       const params = urlObj.searchParams;
 
       return {
-        source: params.get('utm_source') || undefined,
-        medium: params.get('utm_medium') || undefined,
-        campaign: params.get('utm_campaign') || undefined,
-        term: params.get('utm_term') || undefined,
-        content: params.get('utm_content') || undefined,
+        source: params.get("utm_source") || undefined,
+        medium: params.get("utm_medium") || undefined,
+        campaign: params.get("utm_campaign") || undefined,
+        term: params.get("utm_term") || undefined,
+        content: params.get("utm_content") || undefined,
+      };
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Extract common ad platform click identifiers from URL
+   * (fbclid, gclid, ttclid, etc.).
+   */
+  private static extractClickIds(url: string): NormalizedEvent["clickIds"] {
+    try {
+      const urlObj = new URL(url);
+      const params = urlObj.searchParams;
+
+      const fbclid = params.get("fbclid") || undefined;
+      const gclid = params.get("gclid") || undefined;
+      const ttclid = params.get("ttclid") || undefined;
+
+      const hasAny = fbclid || gclid || ttclid;
+      if (!hasAny) {
+        return undefined;
+      }
+
+      return {
+        fbclid,
+        gclid,
+        ttclid,
       };
     } catch {
       return undefined;

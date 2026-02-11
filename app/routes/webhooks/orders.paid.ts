@@ -74,33 +74,14 @@ export async function action({ request }: ActionFunctionArgs) {
       }, { status: 200 });
     }
 
-    // Enrich with attribution from order
+    // Enrich with attribution from order / previous touches
     const enrichedEvent = await AttributionTracker.enrichEvent(normalizedEvent);
 
-    // Store attribution for this order
-    if (normalizedEvent.customerHash) {
-      const lastTouch = await AttributionTracker.getLastTouch(
-        normalizedEvent.customerHash
-      );
-
-      if (lastTouch) {
-        await prisma.attribution.create({
-          data: {
-            shopConfigId: shopConfig.id,
-            customerHash: normalizedEvent.customerHash,
-            orderId: normalizedEvent.orderId!,
-            utmSource: lastTouch.utmSource,
-            utmMedium: lastTouch.utmMedium,
-            utmCampaign: lastTouch.utmCampaign,
-            utmTerm: lastTouch.utmTerm,
-            utmContent: lastTouch.utmContent,
-            landingPage: lastTouch.landingPage,
-            referrer: lastTouch.referrer,
-            firstTouch: false,
-          }
-        });
-      }
-    }
+    // Store order-level attribution using multi-touch history (last-click model)
+    await AttributionTracker.assignOrderAttributionForPurchase(
+      enrichedEvent,
+      shopConfig.id
+    );
 
     // Record purchase event in customer journey
     await CustomerJourneyService.recordEvent(enrichedEvent, shopConfig.id);

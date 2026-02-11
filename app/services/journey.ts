@@ -17,6 +17,14 @@ export class CustomerJourneyService {
     shopConfigId: string
   ): Promise<void> {
     const customerHash = event.customerHash || (event.sessionId ? this.hashSessionId(event.sessionId) : null);
+    
+    console.log('CustomerJourneyService.recordEvent called:', {
+      eventType: event.name,
+      customerHash,
+      hasEventCustomerHash: !!event.customerHash,
+      hasSessionId: !!event.sessionId,
+    });
+
     if (!customerHash) {
       console.warn('Event missing customer identity, skipping journey tracking');
       return;

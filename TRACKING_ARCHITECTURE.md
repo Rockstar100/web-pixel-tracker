@@ -194,6 +194,22 @@ Order paid → orders/paid webhook → Links to stored Attribution → Recorded
 - Conversion timestamp
 - Order value
 
+### Attribution Models & Channels
+
+- **Default model**: `last_click` (used for both `Attribution` and `MultiTouchAttribution.attributionModel`)
+- **Supported models (schema-ready)**: `first_click`, `last_click`, `linear`, `time_decay`, `position_based`
+- **Channel classification** (derived from UTM + referrer and stored in `MultiTouchAttribution.channel`):
+  - `paid_search`: `utm_medium` contains `cpc` / `ppc` / `paid`
+  - `paid_social`: social source (Facebook, Instagram, TikTok, etc.) with paid medium
+  - `organic_search`: `utm_medium` contains `organic`
+  - `organic_social`: social source without an explicit paid medium
+  - `email`: `utm_medium` contains `email` or source contains `mail`
+  - `affiliate`: `utm_medium` contains `affiliate`
+  - `referral`: non-empty referrer with otherwise `direct` source
+  - `direct`: no UTM and no referrer
+
+Raw click IDs like `fbclid`, `gclid`, and `ttclid` are parsed from URLs and kept on the normalized event for future server-side uploads to ad platforms.
+
 ---
 
 ## 6. Customer Journey Tracking
@@ -434,6 +450,29 @@ Your architecture is **already designed for payment gateway redirects**. The sep
 - [ ] Test attribution → UTM params linked to order
 - [ ] Test deduplication → No double conversions
 - [ ] Test cancellation/refund → Proper journey updates
+
+### Attribution Test Matrix (Channels & Creatives)
+
+- **Meta (Facebook/Instagram) paid social**
+  - Click ad with `fbclid` + `utm_source=facebook&utm_medium=paid_social&utm_campaign=meta_test`.
+  - Expect:
+    - `MultiTouchAttribution` row with `channel=paid_social`, `source='facebook'`.
+    - `OrderAttribution` row on purchase with `platform='meta'`, `fbclid` set, `model='last_click'`, `revenue` = order value.
+- **Google Ads (search)**
+  - Click ad with `gclid` + `utm_source=google&utm_medium=cpc&utm_campaign=google_search_test`.
+  - Expect:
+    - `channel=paid_search`, `source='google'` in `MultiTouchAttribution`.
+    - `OrderAttribution` row with `platform='google'`, `gclid` set and correct revenue.
+- **TikTok Ads**
+  - Click ad with `ttclid` + `utm_source=tiktok&utm_medium=paid_social`.
+  - Expect:
+    - `channel=paid_social`, `source='tiktok'` in `MultiTouchAttribution`.
+    - `OrderAttribution` row with `platform='tiktok'`, `ttclid` set.
+- **Email campaigns**
+  - Click email link with `utm_source=klaviyo&utm_medium=email&utm_campaign=newsletter_test`.
+  - Expect:
+    - `channel=email`, `source='klaviyo'` for touch.
+    - Order attributed to email with matching campaign.
 
 ---
 

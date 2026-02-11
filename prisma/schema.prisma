@@ -86,6 +86,11 @@ model ShopConfig {
   customerEventAttributions CustomerEventAttribution[]
   dataRetentionPolicies DataRetentionPolicy[]
   customerSegments    CustomerSegment[]
+
+  // Performance & attribution rollups
+  orderAttributions   OrderAttribution[]
+  adSpendDaily        AdSpendDaily[]
+  channelDailyStats   ChannelDailyStats[]
 }
 
 // Event deduplication and audit log
@@ -261,6 +266,13 @@ model OrderTracking {
   paidAmount          Float         @default(0)  // For partial payments and COD tracking
   currency            String
   lineItems           Int           // Count of line items
+
+  // Profit & cost breakdown (for MER / net profit analytics)
+  cogs                Float?        // Cost of goods sold
+  shippingCost        Float?        // Shipping / logistics cost
+  processingFees      Float?        // Payment gateway + transaction fees
+  otherCosts          Float?        // Any additional per-order costs
+  discountTotal       Float?        // Total discounts applied to the order
   
   // Risk assessment (for fraud detection)
   riskLevel           String        @default("low")  // low, medium, high
@@ -282,6 +294,9 @@ model OrderTracking {
   // Relationship to customer journey
   events              CustomerEvent[]
   multiTouchAttribution MultiTouchAttribution[]
+
+  // Order-level attribution results
+  orderAttributions   OrderAttribution[]
   
   @@unique([shopConfigId, shopifyOrderId])
   @@index([customerHash])
@@ -290,6 +305,98 @@ model OrderTracking {
   @@index([paymentMethod])
   @@index([riskLevel])
   @@index([createdAt, paymentMethod])
+}
+
+// Order-level attribution (resolved from MultiTouchAttribution)
+model OrderAttribution {
+  id                String        @id @default(uuid())
+  shopConfigId      String
+  shopConfig        ShopConfig    @relation(fields: [shopConfigId], references: [id], onDelete: Cascade)
+
+  // Link to underlying order
+  orderId           String
+  orderTracking     OrderTracking @relation(fields: [orderId], references: [shopifyOrderId], onDelete: Cascade)
+
+  // Attribution model used: 'last_click', 'first_click', 'linear', etc.
+  model             String
+
+  // Resolved channel metadata
+  channel           String        // e.g. 'paid_search', 'paid_social', 'organic_search', 'email', 'direct'
+  source            String        // e.g. Google, Facebook, Klaviyo
+  medium            String?
+  campaign          String?
+  content           String?
+
+  // Platform & click identifiers (for ad platform uploads / creative reporting)
+  platform          String?       // 'meta', 'google', 'tiktok', 'email', etc.
+  clickId           String?       // Generic click ID used for joins when platform-agnostic
+  fbclid            String?
+  gclid             String?
+  ttclid            String?
+
+  // Financials (for ROAS / MER / profit)
+  revenue           Float
+  currency          String
+  attributionWeight Float         @default(1.0)
+
+  createdAt         DateTime      @default(now())
+
+  @@index([shopConfigId, model, channel, source, campaign, createdAt])
+  @@index([orderId])
+}
+
+// Daily ad spend imported from ad platforms (Meta, Google, TikTok, email tools, etc.)
+model AdSpendDaily {
+  id            String   @id @default(uuid())
+  shopConfigId  String
+  shopConfig    ShopConfig @relation(fields: [shopConfigId], references: [id], onDelete: Cascade)
+
+  date          DateTime
+  platform      String   // 'meta', 'google', 'tiktok', 'email', etc.
+  campaignId    String?
+  adSetId       String?
+  adId          String?
+
+  spend         Float
+  impressions   Int?
+  clicks        Int?
+  currency      String
+
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([shopConfigId, platform, date])
+  @@index([shopConfigId, platform, campaignId, adId])
+}
+
+// Denormalized daily performance metrics for fast dashboard queries
+model ChannelDailyStats {
+  id              String   @id @default(uuid())
+  shopConfigId    String
+  shopConfig      ShopConfig @relation(fields: [shopConfigId], references: [id], onDelete: Cascade)
+
+  date            DateTime
+  channel         String   // e.g. 'paid_search', 'paid_social', 'email'
+  source          String   // e.g. Google, Facebook
+  campaign        String?
+  adId            String?
+
+  orders          Int      @default(0)
+  newCustomers    Int      @default(0)
+  repeatCustomers Int      @default(0)
+
+  revenue         Float    @default(0)
+  grossProfit     Float    @default(0)
+  spend           Float    @default(0)
+
+  // Derived ratios (can be recalculated, stored here for quick reads)
+  roas            Float?   // revenue / spend
+  mer             Float?   // total revenue / total spend (for the brand)
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([shopConfigId, date, channel, source, campaign])
 }
 
 // Customer event stream (full funnel/journey tracking)

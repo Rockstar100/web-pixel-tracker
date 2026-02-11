@@ -7,14 +7,14 @@ export interface NormalizedEvent {
   name: string;
   shop: string;
   brandId: string;
-  
+
   // Page context
   url?: string;
   referrer?: string;
   title?: string;
   hostname?: string;
-  
-  // UTM attribution
+
+  // UTM attribution (campaign level)
   utm?: {
     source?: string;
     medium?: string;
@@ -22,24 +22,51 @@ export interface NormalizedEvent {
     term?: string;
     content?: string;
   };
-  
+
+  /**
+   * Ad / marketing metadata
+   * These fields are intentionally generic so they can represent Meta, Google, TikTok, email, etc.
+   * and map cleanly into MultiTouchAttribution.channel/source/medium/campaign/content.
+   */
+  marketing?: {
+    // High-level channel classification (paid_search, paid_social, organic_search, direct, email, referral, affiliate, other)
+    channel?: string;
+    // Platform or network, e.g. facebook, instagram, google, tiktok, klaviyo, mailchimp
+    platform?: string;
+    // Ad platform identifiers (optional, for later server-side API uploads)
+    campaignId?: string;
+    adSetId?: string;
+    adId?: string;
+  };
+
+  /**
+   * Raw click identifiers pulled from query params, kept for potential
+   * server-side conversion uploads to ad platforms.
+   */
+  clickIds?: {
+    fbclid?: string;
+    gclid?: string;
+    ttclid?: string;
+    [key: string]: string | undefined;
+  };
+
   // Customer identity (hashed)
   customerHash?: string;
   sessionId?: string;
-  customerIdentity?: 'email' | 'session';
+  customerIdentity?: "email" | "session";
   isAnonymous?: boolean;
-  
+
   // Order/transaction data
   orderId?: string;
   checkoutId?: string;
   value?: number;
   currency?: string;
   itemsCount?: number;
-  
+
   // Event metadata
   timestamp: Date;
-  source: 'pixel' | 'webhook' | 'provider';
-  
+  source: "pixel" | "webhook" | "provider";
+
   // Additional properties
   data?: Record<string, unknown>;
 }

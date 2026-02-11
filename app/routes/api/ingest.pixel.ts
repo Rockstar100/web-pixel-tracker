@@ -174,6 +174,14 @@ async function handlePixelRequest(request: Request, corsHeaders: Headers) {
     // Enrich with stored attribution
     const enrichedEvent = await AttributionTracker.enrichEvent(normalizedEvent);
 
+    console.log('About to record event:', {
+      eventName: enrichedEvent.name,
+      customerHash: enrichedEvent.customerHash,
+      sessionId: enrichedEvent.sessionId,
+      customerIdentity: enrichedEvent.customerIdentity,
+      shopConfigId: shopConfig.id,
+    });
+
     await CustomerJourneyService.recordEvent(enrichedEvent, shopConfig.id);
 
     // Forward to Umami
@@ -264,3 +272,5 @@ async function findShopConfig(shop: string) {
     include: { brand: true }
   });
 }
+ 
+ 

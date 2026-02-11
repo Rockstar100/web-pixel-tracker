@@ -70,31 +70,43 @@ export class AttributionTracker {
     campaign?: string;
     content?: string;
   } {
-    const source = event.utm?.source || 'direct';
+    const source = event.utm?.source || "direct";
     const medium = event.utm?.medium || undefined;
     const campaign = event.utm?.campaign || undefined;
     const content = event.utm?.content || undefined;
 
-    const mediumLower = medium?.toLowerCase() || '';
+    const mediumLower = medium?.toLowerCase() || "";
     const sourceLower = source.toLowerCase();
 
-    let channel = 'direct';
+    // Default channel classification inspired by common analytics practice
+    let channel = "direct";
 
-    if (mediumLower.includes('email') || sourceLower.includes('mail')) {
-      channel = 'email';
-    } else if (mediumLower.includes('cpc') || mediumLower.includes('ppc') || mediumLower.includes('paid')) {
-      channel = 'paid_search';
+    if (mediumLower.includes("email") || sourceLower.includes("mail")) {
+      channel = "email";
     } else if (
-      mediumLower.includes('social') ||
-      ['facebook', 'instagram', 'tiktok', 'twitter', 'linkedin', 'youtube', 'pinterest'].includes(sourceLower)
+      mediumLower.includes("cpc") ||
+      mediumLower.includes("ppc") ||
+      mediumLower.includes("paid")
     ) {
-      channel = 'social';
-    } else if (mediumLower.includes('affiliate')) {
-      channel = 'affiliate';
-    } else if (event.referrer && source === 'direct') {
-      channel = 'referral';
-    } else if (mediumLower.includes('organic')) {
-      channel = 'organic';
+      channel = "paid_search";
+    } else if (
+      mediumLower.includes("social") ||
+      ["facebook", "instagram", "tiktok", "twitter", "linkedin", "youtube", "pinterest"].includes(
+        sourceLower
+      )
+    ) {
+      // Distinguish paid vs organic social based on medium if available
+      if (mediumLower.includes("paid") || mediumLower.includes("cpc")) {
+        channel = "paid_social";
+      } else {
+        channel = "organic_social";
+      }
+    } else if (mediumLower.includes("affiliate")) {
+      channel = "affiliate";
+    } else if (mediumLower.includes("organic")) {
+      channel = "organic_search";
+    } else if (event.referrer && source === "direct") {
+      channel = "referral";
     }
 
     return { channel, source, medium, campaign, content };
@@ -135,6 +147,90 @@ export class AttributionTracker {
         touchAt: event.timestamp
       }
     });
+  }
+
+  /**
+   * Resolve and store order-level attribution for a purchase event.
+   * Currently uses a simple last-click model within a 7-day window.
+   */
+  static async assignOrderAttributionForPurchase(
+    event: NormalizedEvent,
+    shopConfigId: string,
+    model: string = 'last_click'
+  ): Promise<void> {
+    if (!event.orderId) {
+      return;
+    }
+
+    const attributionIdentity = this.deriveAttributionIdentity(event);
+    if (!attributionIdentity) {
+      return;
+    }
+
+    // Attribution window: last 7 days by default
+    const windowDays = 7;
+    const cutoff = new Date(event.timestamp);
+    cutoff.setDate(cutoff.getDate() - windowDays);
+
+    const touches = await prisma.multiTouchAttribution.findMany({
+      where: {
+        shopConfigId,
+        customerHash: attributionIdentity,
+        touchAt: {
+          gte: cutoff,
+          lte: event.timestamp
+        }
+      },
+      orderBy: {
+        touchAt: 'asc'
+      }
+    });
+
+    if (!touches.length) {
+      // Nothing to attribute – skip rather than creating "direct" rows here.
+      return;
+    }
+
+    // Last-click model: pick the last eligible touch
+    const winningTouch = touches[touches.length - 1];
+
+    const platform = this.inferPlatform(winningTouch.source);
+    const clickIds = event.clickIds || {};
+
+    await prisma.orderAttribution.create({
+      data: {
+        shopConfigId,
+        orderId: event.orderId,
+        model,
+        channel: winningTouch.channel,
+        source: winningTouch.source,
+        medium: winningTouch.medium,
+        campaign: winningTouch.campaign,
+        content: winningTouch.content,
+        platform,
+        clickId: clickIds.fbclid || clickIds.gclid || clickIds.ttclid || null,
+        fbclid: clickIds.fbclid,
+        gclid: clickIds.gclid,
+        ttclid: clickIds.ttclid,
+        revenue: event.value || 0,
+        currency: event.currency || 'USD',
+        attributionWeight: 1.0
+      }
+    });
+  }
+
+  /**
+   * Infer platform from source string (very lightweight heuristic).
+   */
+  private static inferPlatform(source: string | null | undefined): string | null {
+    if (!source) return null;
+    const s = source.toLowerCase();
+    if (s.includes('facebook') || s.includes('instagram') || s.includes('meta')) return 'meta';
+    if (s.includes('google')) return 'google';
+    if (s.includes('tiktok')) return 'tiktok';
+    if (s.includes('klaviyo') || s.includes('mailchimp') || s.includes('sendgrid')) return 'email';
+    if (s.includes('bing') || s.includes('microsoft')) return 'msads';
+    return null;
   }
 
   /**

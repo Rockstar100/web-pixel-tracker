@@ -1,14 +1,14 @@
-import type { LoaderFunctionArgs, ActionFunctionArgs } from "@react-router/node";
 import { useLoaderData, Form, useActionData } from "react-router";
 import { PrismaClient } from "@prisma/client";
 import { EventDeduplicator } from "../services/deduplicator";
+import { FunnelAnalyticsService } from "../services/funnels";
 
 const prisma = new PrismaClient();
 
 /**
  * Loader: Fetch brands and shop configurations
  */
-export async function loader({ request }: LoaderFunctionArgs) {
+export async function loader({ request }: { request: Request }) {
   const url = new URL(request.url);
   const shop = url.searchParams.get("shop");
 
@@ -29,10 +29,88 @@ export async function loader({ request }: LoaderFunctionArgs) {
     }) : []
   ]);
 
-  // Get event stats if shop is configured
+  // Get event stats and behavioral insights if shop is configured
   let stats = null;
+  let channelPerformance: any[] = [];
+  let channelFunnels: any[] = [];
+  let lowRoasCampaigns: any[] = [];
   if (shopConfig) {
     stats = await EventDeduplicator.getStats(shopConfig.id, 7);
+
+    // Simple channel-level performance for last 30 days using OrderAttribution + AdSpendDaily
+    const since = new Date();
+    since.setDate(since.getDate() - 30);
+
+    const [attributions, adSpend] = await Promise.all([
+      (prisma as any).orderAttribution.findMany({
+        where: {
+          shopConfigId: shopConfig.id,
+          createdAt: { gte: since }
+        }
+      }),
+      (prisma as any).adSpendDaily.findMany({
+        where: {
+          shopConfigId: shopConfig.id,
+          date: { gte: since }
+        }
+      })
+    ]);
+
+    const spendByKey = new Map<string, { spend: number }>();
+    adSpend.forEach((row: any) => {
+      const key = [row.platform, row.campaignId || '', row.adId || ''].join('|');
+      const bucket = spendByKey.get(key) || { spend: 0 };
+      bucket.spend += row.spend;
+      spendByKey.set(key, bucket);
+    });
+
+    const perfByKey = new Map<
+      string,
+      { channel: string; source: string; campaign?: string | null; adId?: string | null; orders: number; revenue: number; spend: number }
+    >();
+
+    attributions.forEach((attr: any) => {
+      const key = [attr.channel, attr.source || '', attr.campaign || '', attr.adId || ''].join('|');
+      const bucket =
+        perfByKey.get(key) || {
+          channel: attr.channel,
+          source: attr.source,
+          campaign: attr.campaign,
+          adId: attr.adId || null,
+          orders: 0,
+          revenue: 0,
+          spend: 0
+        };
+
+      bucket.orders += 1;
+      bucket.revenue += attr.revenue;
+
+      const spendKey = [attr.platform || '', attr.campaign || '', attr.adId || ''].join('|');
+      const spendBucket = spendByKey.get(spendKey);
+      if (spendBucket) {
+        bucket.spend = spendBucket.spend;
+      }
+
+      perfByKey.set(key, bucket);
+    });
+
+    const perfArray = Array.from(perfByKey.values())
+      .map((row) => ({
+        ...row,
+        roas: row.spend > 0 ? row.revenue / row.spend : null,
+        mer: row.spend > 0 ? row.revenue / row.spend : null // same metric at this aggregation level
+      }))
+      .sort((a, b) => b.revenue - a.revenue);
+
+    channelPerformance = perfArray.slice(0, 20);
+
+    // Low-ROAS segments (campaigns performing poorly)
+    lowRoasCampaigns = perfArray
+      .filter((row) => row.spend > 0 && row.revenue > 0 && row.roas !== null && row.roas < 1)
+      .slice(0, 20);
+
+    // Funnel per channel based on pixel events
+    channelFunnels = await FunnelAnalyticsService.getFunnelByChannel(shopConfig.id, 30);
   }
 
   return Response.json({
@@ -40,6 +118,9 @@ export async function loader({ request }: LoaderFunctionArgs) {
     shopConfig,
     healthLogs,
     stats,
+    channelPerformance,
+    channelFunnels,
+    lowRoasCampaigns,
     shop
   });
 }
@@ -47,7 +128,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
 /**
  * Action: Handle form submissions
  */
-export async function action({ request }: ActionFunctionArgs) {
+export async function action({ request }: { request: Request }) {
   const formData = await request.formData();
   const action = formData.get("action");
 
@@ -106,8 +187,17 @@ export async function action({ request }: ActionFunctionArgs) {
  * Dashboard UI Component
  */
 export default function Dashboard() {
-  const { brands, shopConfig, healthLogs, stats, shop } = useLoaderData<typeof loader>();
-  const actionData = useActionData<typeof action>();
+  const {
+    brands,
+    shopConfig,
+    healthLogs,
+    stats,
+    channelPerformance,
+    channelFunnels,
+    lowRoasCampaigns,
+    shop,
+  } = useLoaderData() as any;
+  const actionData = useActionData() as any;
 
   return (
     <div style={{ padding: "20px", fontFamily: "Arial, sans-serif" }}>
@@ -157,6 +247,109 @@ export default function Dashboard() {
         </div>
       )}
 
+      {/* Channel & Campaign Performance */}
+      {shopConfig && channelPerformance && channelPerformance.length > 0 && (
+        <div style={{ marginBottom: "30px", padding: "15px", background: "#e0f2f1", borderRadius: "8px" }}>
+          <h2>📈 Channel & Campaign Performance (Last 30 Days)</h2>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px", marginTop: "10px" }}>
+            <thead>
+              <tr style={{ background: "#f5f5f5" }}>
+                <th style={{ padding: "8px", textAlign: "left" }}>Channel</th>
+                <th style={{ padding: "8px", textAlign: "left" }}>Source</th>
+                <th style={{ padding: "8px", textAlign: "left" }}>Campaign</th>
+                <th style={{ padding: "8px", textAlign: "right" }}>Orders</th>
+                <th style={{ padding: "8px", textAlign: "right" }}>Revenue</th>
+                <th style={{ padding: "8px", textAlign: "right" }}>Spend</th>
+                <th style={{ padding: "8px", textAlign: "right" }}>ROAS</th>
+              </tr>
+            </thead>
+            <tbody>
+              {channelPerformance.map((row: any) => (
+                <tr key={`${row.channel}-${row.source}-${row.campaign || ''}-${row.adId || ''}`} style={{ borderBottom: "1px solid #eee" }}>
+                  <td style={{ padding: "8px" }}>{row.channel}</td>
+                  <td style={{ padding: "8px" }}>{row.source}</td>
+                  <td style={{ padding: "8px" }}>{row.campaign || "-"}</td>
+                  <td style={{ padding: "8px", textAlign: "right" }}>{row.orders}</td>
+                  <td style={{ padding: "8px", textAlign: "right" }}>{row.revenue.toFixed(2)}</td>
+                  <td style={{ padding: "8px", textAlign: "right" }}>{row.spend > 0 ? row.spend.toFixed(2) : "-"}</td>
+                  <td style={{ padding: "8px", textAlign: "right" }}>{row.roas ? row.roas.toFixed(2) : "-"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* Funnels by Channel (behavioral drop-off) */}
+      {shopConfig && channelFunnels && channelFunnels.length > 0 && (
+        <div style={{ marginBottom: "30px", padding: "15px", background: "#f1f5f9", borderRadius: "8px" }}>
+          <h2>🧭 Funnels by Channel (Last 30 Days, Pixel Events)</h2>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px", marginTop: "10px" }}>
+            <thead>
+              <tr style={{ background: "#f5f5f5" }}>
+                <th style={{ padding: "8px", textAlign: "left" }}>Channel</th>
+                <th style={{ padding: "8px", textAlign: "left" }}>Source</th>
+                <th style={{ padding: "8px", textAlign: "right" }}>Page Views</th>
+                <th style={{ padding: "8px", textAlign: "right" }}>Add to Cart</th>
+                <th style={{ padding: "8px", textAlign: "right" }}>Begin Checkout</th>
+                <th style={{ padding: "8px", textAlign: "right" }}>Purchases</th>
+                <th style={{ padding: "8px", textAlign: "right" }}>PV→Cart %</th>
+                <th style={{ padding: "8px", textAlign: "right" }}>Cart→Checkout %</th>
+                <th style={{ padding: "8px", textAlign: "right" }}>Checkout→Purchase %</th>
+              </tr>
+            </thead>
+            <tbody>
+              {channelFunnels.map((row: any) => (
+                <tr key={`${row.channel}-${row.source}`} style={{ borderBottom: "1px solid #eee" }}>
+                  <td style={{ padding: "8px" }}>{row.channel}</td>
+                  <td style={{ padding: "8px" }}>{row.source}</td>
+                  <td style={{ padding: "8px", textAlign: "right" }}>{row.stages.page_view}</td>
+                  <td style={{ padding: "8px", textAlign: "right" }}>{row.stages.add_to_cart}</td>
+                  <td style={{ padding: "8px", textAlign: "right" }}>{row.stages.begin_checkout}</td>
+                  <td style={{ padding: "8px", textAlign: "right" }}>{row.stages.purchase}</td>
+                  <td style={{ padding: "8px", textAlign: "right" }}>{row.conversionRates.pageViewToCart.toFixed(2)}</td>
+                  <td style={{ padding: "8px", textAlign: "right" }}>{row.conversionRates.cartToCheckout.toFixed(2)}</td>
+                  <td style={{ padding: "8px", textAlign: "right" }}>{row.conversionRates.checkoutToConversion.toFixed(2)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* Low-ROAS Campaign Segments */}
+      {shopConfig && lowRoasCampaigns && lowRoasCampaigns.length > 0 && (
+        <div style={{ marginBottom: "30px", padding: "15px", background: "#fef2f2", borderRadius: "8px" }}>
+          <h2>⚠️ Low-ROAS Campaign Segments (ROAS &lt; 1, Last 30 Days)</h2>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px", marginTop: "10px" }}>
+            <thead>
+              <tr style={{ background: "#f5f5f5" }}>
+                <th style={{ padding: "8px", textAlign: "left" }}>Channel</th>
+                <th style={{ padding: "8px", textAlign: "left" }}>Source</th>
+                <th style={{ padding: "8px", textAlign: "left" }}>Campaign</th>
+                <th style={{ padding: "8px", textAlign: "right" }}>Orders</th>
+                <th style={{ padding: "8px", textAlign: "right" }}>Revenue</th>
+                <th style={{ padding: "8px", textAlign: "right" }}>Spend</th>
+                <th style={{ padding: "8px", textAlign: "right" }}>ROAS</th>
+              </tr>
+            </thead>
+            <tbody>
+              {lowRoasCampaigns.map((row: any) => (
+                <tr key={`low-${row.channel}-${row.source}-${row.campaign || ''}-${row.adId || ''}`} style={{ borderBottom: "1px solid #eee" }}>
+                  <td style={{ padding: "8px" }}>{row.channel}</td>
+                  <td style={{ padding: "8px" }}>{row.source}</td>
+                  <td style={{ padding: "8px" }}>{row.campaign || "-"}</td>
+                  <td style={{ padding: "8px", textAlign: "right" }}>{row.orders}</td>
+                  <td style={{ padding: "8px", textAlign: "right" }}>{row.revenue.toFixed(2)}</td>
+                  <td style={{ padding: "8px", textAlign: "right" }}>{row.spend > 0 ? row.spend.toFixed(2) : "-"}</td>
+                  <td style={{ padding: "8px", textAlign: "right" }}>{row.roas ? row.roas.toFixed(2) : "-"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
       {/* Configuration Form */}
       {shop && (
         <div style={{ marginBottom: "30px", padding: "15px", background: "#fff3e0", borderRadius: "8px" }}>
@@ -170,7 +363,7 @@ export default function Dashboard() {
                 <strong>Brand:</strong>
                 <select name="brandId" defaultValue={shopConfig?.brandId} style={{ marginLeft: "10px", padding: "5px" }}>
                   <option value="">Select a brand...</option>
-                  {brands.map(brand => (
+                  {brands.map((brand: any) => (
                     <option key={brand.id} value={brand.id}>{brand.name}</option>
                   ))}
                 </select>
@@ -239,7 +432,7 @@ export default function Dashboard() {
             </tr>
           </thead>
           <tbody>
-            {brands.map(brand => (
+              {brands.map((brand: any) => (
               <tr key={brand.id} style={{ borderBottom: "1px solid #ddd" }}>
                 <td style={{ padding: "10px" }}><strong>{brand.name}</strong></td>
                 <td style={{ padding: "10px" }}><code>{brand.umamiWebsiteUuid}</code></td>
@@ -295,7 +488,7 @@ export default function Dashboard() {
               </tr>
             </thead>
             <tbody>
-              {healthLogs.map(log => (
+              {healthLogs.map((log: any) => (
                 <tr key={log.id} style={{ borderBottom: "1px solid #eee" }}>
                   <td style={{ padding: "8px" }}>{new Date(log.timestamp).toLocaleString()}</td>
                   <td style={{ padding: "8px" }}><code>{log.component}</code></td>
