@@ -14,6 +14,7 @@ import express from "express";
 import compression from "compression";
 import { createRequestHandler } from "@react-router/express";
 import { PrismaClient } from "@prisma/client";
+import geoip from "geoip-lite";
 
 // ---------------------------------------------------------------------------
 // Singleton Prisma client for pixel ingestion
@@ -160,10 +161,11 @@ async function handlePixelIngestion(req, res) {
       referrer
     );
 
-    // Extract device/browser/IP from the HTTP request
+    // Extract device/browser/IP/geo from the HTTP request
     const userAgent = req.headers["user-agent"] || "";
     const deviceInfo = parseUserAgent(userAgent);
     const ipHash = hashIp(req);
+    const geoInfo = lookupGeo(req);
 
     // Extract checkout/order data for conversion events
     const checkout = pixelEvent.data?.checkout;
@@ -251,6 +253,10 @@ async function handlePixelIngestion(req, res) {
             os: deviceInfo.os || null,
             osVersion: deviceInfo.osVersion || null,
             ipHash: ipHash || null,
+            // Geo info (from GeoIP lookup)
+            country: geoInfo.country || null,
+            region: geoInfo.region || null,
+            city: geoInfo.city || null,
             value: pixelValue || null,
             currency: pixelValue ? pixelCurrency : null,
             itemsCount: checkout?.lineItems?.length || null,
@@ -320,6 +326,10 @@ async function handlePixelIngestion(req, res) {
             browser: deviceInfo.browser || null,
             os: deviceInfo.os || null,
             ipHash: ipHash || null,
+            // Geo info (from GeoIP lookup)
+            country: geoInfo.country || null,
+            region: geoInfo.region || null,
+            city: geoInfo.city || null,
             attributionWeight: 0, // Weights computed later when order completes
             attributionModel: "pending",
             touchAt: new Date(),
@@ -664,14 +674,41 @@ function hashSessionId(sessionId) {
 // ---------------------------------------------------------------------------
 // Helper: hash an IP address for privacy (SHA-256)
 // ---------------------------------------------------------------------------
-function hashIp(req) {
-  const ip =
+function getClientIp(req) {
+  return (
     req.headers["x-forwarded-for"]?.split(",")[0]?.trim() ||
     req.headers["x-real-ip"] ||
     req.socket?.remoteAddress ||
-    "";
+    ""
+  );
+}
+
+function hashIp(req) {
+  const ip = getClientIp(req);
   if (!ip) return null;
   return crypto.createHash("sha256").update(ip).digest("hex");
+}
+
+// ---------------------------------------------------------------------------
+// Helper: GeoIP lookup — resolve IP to country/region/city
+// Uses geoip-lite (bundled MaxMind GeoLite2 database, no API calls)
+// ---------------------------------------------------------------------------
+function lookupGeo(req) {
+  try {
+    const ip = getClientIp(req);
+    if (!ip) return {};
+    // Strip IPv6 prefix if present (e.g. ::ffff:1.2.3.4)
+    const cleanIp = ip.replace(/^::ffff:/, "");
+    const geo = geoip.lookup(cleanIp);
+    if (!geo) return {};
+    return {
+      country: geo.country || null,
+      region: geo.region || null,
+      city: geo.city || null,
+    };
+  } catch {
+    return {};
+  }
 }
 
 // ---------------------------------------------------------------------------
