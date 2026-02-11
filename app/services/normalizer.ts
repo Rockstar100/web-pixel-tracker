@@ -146,6 +146,7 @@ export class EventNormalizer {
       'orders/paid': 'purchase',
       'orders/updated': 'order_updated',
       'orders/cancelled': 'order_cancelled',
+      'orders/refund': 'order_refunded',
       'checkouts/create': 'checkout_created',
       'checkouts/update': 'checkout_updated',
       'customers/create': 'customer_created',
@@ -161,7 +162,11 @@ export class EventNormalizer {
    * Get event type category
    */
   private static getEventType(eventName: string): string {
-    if (eventName.includes('purchase') || eventName.includes('order')) {
+    // Handle refunds and cancellations - these are reversals, not conversions
+    if (eventName.includes('refund') || eventName.includes('cancelled') || eventName.includes('cancel')) {
+      return 'reversal';
+    }
+    if (eventName.includes('purchase') || eventName.includes('order_created')) {
       return 'conversion';
     }
     if (eventName.includes('checkout') || eventName.includes('payment')) {

@@ -4,6 +4,7 @@ import { EventNormalizer } from "../../services/normalizer";
 import { EventDeduplicator } from "../../services/deduplicator";
 import { UmamiForwarder } from "../../services/umami-forwarder";
 import { AttributionTracker } from "../../services/attribution";
+import { CustomerJourneyService } from "../../services/journey";
 import type { ShopifyWebhookPayload, ShopConfigData } from "../../services/types";
 
 const prisma = new PrismaClient();
@@ -11,6 +12,7 @@ const prisma = new PrismaClient();
 /**
  * Orders/Paid webhook handler
  * This is the authoritative conversion event (server-side truth)
+ * IMPORTANT: Only orders with financial_status="paid" are counted as conversions
  */
 export async function action({ request }: ActionFunctionArgs) {
   if (request.method !== "POST") {
@@ -100,6 +102,30 @@ export async function action({ request }: ActionFunctionArgs) {
       }
     }
 
+    // Record purchase event in customer journey
+    await CustomerJourneyService.recordEvent(enrichedEvent, shopConfig.id);
+
+    // Track order status as paid/completed
+    const orderId = normalizedEvent.orderId;
+    const customerEmail = payload.customer?.email || payload.email || "unknown@unknown.com";
+    const totalPrice = enrichedEvent.value || 0;
+    const currency = enrichedEvent.currency || typedShopConfig.brand.defaultCurrency;
+    const lineItems = enrichedEvent.itemsCount || payload.line_items?.length || 0;
+
+    if (orderId) {
+      await CustomerJourneyService.trackOrderStatus(
+        orderId,
+        customerEmail,
+        'paid',
+        payload.financial_status || 'paid',
+        payload.fulfillment_status,
+        totalPrice,
+        currency,
+        lineItems,
+        shopConfig.id
+      );
+    }
+
     // Forward to Umami
     const forwardResult = await UmamiForwarder.forward(
       enrichedEvent,
@@ -119,9 +145,10 @@ export async function action({ request }: ActionFunctionArgs) {
         shopifyShop: shop,
         component: 'webhook',
         status: forwardResult.success ? 'success' : 'error',
-        message: `Processed orders/paid webhook`,
+        message: `Processed orders/paid webhook - conversion recorded`,
         details: JSON.stringify({
           orderId: normalizedEvent.orderId,
+          customerHash: normalizedEvent.customerHash,
           value: normalizedEvent.value,
           forwarded: forwardResult.success
         })

@@ -14,10 +14,11 @@ export class EventDeduplicator {
    */
   static async checkAndStore(
     event: NormalizedEvent,
-    shopConfigId: string
+    shopConfigId: string,
+    customEventKey?: string
   ): Promise<DedupeResult> {
-    // Generate dedupe key
-    const eventKey = EventNormalizer.generateEventKey(
+    // Generate dedupe key (or use custom key for special events like refunds/cancellations)
+    const eventKey = customEventKey || EventNormalizer.generateEventKey(
       event.shop,
       event.name,
       event.orderId,

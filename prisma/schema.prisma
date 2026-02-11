@@ -77,6 +77,13 @@ model ShopConfig {
   
   eventsReceived      EventReceived[]
   attributions        Attribution[]
+  multiTouchAttributions MultiTouchAttribution[]
+  attributionModels   AttributionModel[]
+  orderTracking       OrderTracking[]
+  customerEvents      CustomerEvent[]
+  customerJourneys    CustomerJourney[]
+  dataRetentionPolicies DataRetentionPolicy[]
+  customerSegments    CustomerSegment[]
 }
 
 // Event deduplication and audit log
@@ -136,6 +143,77 @@ model Attribution {
   @@index([sessionId])
 }
 
+// Multi-touch Attribution (tracks all touchpoints, not just first/last)
+model MultiTouchAttribution {
+  id                  String        @id @default(uuid())
+  shopConfigId        String
+  shopConfig          ShopConfig    @relation(fields: [shopConfigId], references: [id], onDelete: Cascade)
+  
+  customerHash        String        // SHA256 hashed email
+  orderId             String?       // Shopify order ID (nullable for non-order touches)
+  orderTracking       OrderTracking? @relation(fields: [orderId], references: [shopifyOrderId])
+  
+  // Touch point sequence
+  touchPosition       Int           // 1 = first, 2 = second, etc.
+  touchType           String        // "click", "view", "direct", "referral"
+  
+  // Channel information (multi-channel attribution)
+  channel             String        // "organic", "paid_search", "social", "direct", "email", "referral", "affiliate"
+  source              String        // Google, Facebook, email_campaign, etc.
+  medium              String?       // CPC, CPM, email, etc.
+  campaign            String?
+  content             String?       // Ad creative or email subject
+  
+  // Device & browser info
+  deviceType          String?       // "mobile", "tablet", "desktop"
+  browser             String?       // Chrome, Safari, Firefox
+  os                  String?       // iOS, Android, Windows
+  
+  // Geographic & temporal
+  country             String?
+  region              String?
+  city                String?
+  ipHash              String?       // SHA256 hashed IP for privacy
+  
+  // Attribution weight
+  attributionWeight   Float         @default(0.0) // 0-1 based on model
+  attributionModel    String        @default("last_click") // first_click, last_click, linear, time_decay, position_based
+  
+  // Timing
+  touchAt             DateTime
+  timeToConversion    Int?          // Days from this touch to conversion
+  
+  createdAt           DateTime      @default(now())
+  
+  @@index([customerHash, orderId])
+  @@index([channel, touchAt])
+  @@index([attributionModel])
+  @@index([country])
+}
+
+// Attribution Model Configuration (for different attribution strategies)
+model AttributionModel {
+  id                  String        @id @default(uuid())
+  shopConfigId        String
+  shopConfig          ShopConfig    @relation(fields: [shopConfigId], references: [id], onDelete: Cascade)
+  
+  name                String        // "First Click", "Last Click", "Linear", "Time Decay", "Position Based"
+  modelType           String        // first_click, last_click, linear, time_decay, position_based, custom
+  
+  // Model configuration
+  config              String?       // JSON with model-specific settings
+  // For time decay: decay_rate (e.g., 0.5)
+  // For position: first_weight (e.g., 0.4), middle_weight (0.2), last_weight (0.4)
+  
+  enabled             Boolean       @default(true)
+  isDefault           Boolean       @default(false)
+  
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+  
+  @@unique([shopConfigId, modelType])
+}
+
 // Provider connector configuration (for third-party checkouts)
 model ProviderConnector {
   id                  String        @id @default(uuid())
@@ -155,12 +233,445 @@ model ProviderConnector {
   @@unique([shopifyShop, providerName])
 }
 
+// Order tracking with status lifecycle
+model OrderTracking {
+  id                  String        @id @default(uuid())
+  shopConfigId        String
+  shopConfig          ShopConfig    @relation(fields: [shopConfigId], references: [id], onDelete: Cascade)
+  
+  shopifyOrderId      String        @unique // Unique identifier from Shopify
+  customerEmail       String
+  customerHash        String        // SHA256 hashed email for privacy
+  
+  // Order status tracking
+  status              String        // "created", "confirmed", "paid", "refunded", "cancelled", "completed"
+  financialStatus     String        // "authorized", "pending", "paid", "refunded", "voided", "partially_paid", "partially_refunded"
+  fulfillmentStatus   String?       // "fulfilled", "partial", "unfulfilled", "scheduled", "on_hold"
+  
+  // Payment information
+  paymentMethod       String        // "online_payment", "cod" (Cash on Delivery), "bank_transfer", "wallet", "check", "prepaid"
+  paymentGateway      String?       // "stripe", "razorpay", "paypal", "square", etc.
+  
+  // Order data
+  totalPrice          Float
+  paidAmount          Float         @default(0)  // For partial payments and COD tracking
+  currency            String
+  lineItems           Int           // Count of line items
+  
+  // Risk assessment (for fraud detection)
+  riskLevel           String        @default("low")  // low, medium, high
+  riskSignals         String?       // JSON array of risk indicators
+  
+  // Timeline tracking
+  createdAt           DateTime      @default(now())
+  confirmedAt         DateTime?     // When order was confirmed by customer
+  paidAt              DateTime?     // When full payment received
+  refundedAt          DateTime?
+  cancelledAt         DateTime?
+  completedAt         DateTime?
+  
+  // Analytics flags
+  isReturningCustomer Boolean       @default(false)
+  firstTimeCustomer   Boolean       @default(false)
+  isTest              Boolean       @default(false)  // For test orders
+  
+  // Relationship to customer journey
+  events              CustomerEvent[]
+  multiTouchAttribution MultiTouchAttribution[]
+  
+  @@unique([shopConfigId, shopifyOrderId])
+  @@index([customerHash])
+  @@index([status, paymentMethod])
+  @@index([financialStatus])
+  @@index([paymentMethod])
+  @@index([riskLevel])
+  @@index([createdAt, paymentMethod])
+}
+
+// Customer event stream (full funnel/journey tracking)
+model CustomerEvent {
+  id                  String        @id @default(uuid())
+  shopConfigId        String
+  shopConfig          ShopConfig    @relation(fields: [shopConfigId], references: [id], onDelete: Cascade)
+  
+  // Customer identification
+  customerHash        String        // SHA256 hashed email
+  sessionId           String?       // Browser session ID
+  deviceId            String?       // Device fingerprint (hashed)
+  
+  // Event details
+  eventType           String        // "page_view", "add_to_cart", "begin_checkout", "purchase", "cancel", "refund", etc.
+  eventName           String        // Human readable name
+  
+  // Page context (for pixel events)
+  pageUrl             String?
+  pageTitle           String?
+  pageReferrer        String?
+  
+  // Transaction context
+  orderId             String?       // Link to order if applicable
+  checkoutId          String?
+  orderTracking       OrderTracking? @relation(fields: [orderId], references: [shopifyOrderId])
+  
+  // UTM Attribution
+  utmSource           String?
+  utmMedium           String?
+  utmCampaign         String?
+  utmTerm             String?
+  utmContent          String?
+  
+  // Device and browser info
+  deviceType          String?       // "mobile", "tablet", "desktop"
+  browser             String?       // Chrome, Safari, Firefox
+  browserVersion      String?
+  os                  String?       // iOS, Android, Windows, macOS
+  osVersion           String?
+  
+  // Geographic info
+  country             String?
+  region              String?
+  city                String?
+  ipHash              String?       // SHA256 hashed IP for privacy
+  
+  // Privacy & Consent
+  consentGiven        Boolean?      // Whether user gave explicit consent
+  consentType         String?       // "implicit", "explicit", "opt_in", "opt_out"
+  isAnonymous         Boolean       @default(false)  // True if user opted for anonymous tracking
+  
+  // Event value (for purchases, cart additions, etc.)
+  value               Float?
+  currency            String?
+  itemsCount          Int?
+  
+  // Source of event
+  source              String        // "pixel", "webhook", "provider"
+  
+  // Event metadata
+  eventData           String?       // JSON: additional properties
+  
+  // Version tracking
+  eventVersion        String        @default("1.0")  // For schema evolution
+  
+  // Timestamps
+  timestamp           DateTime      @default(now())
+  processedAt         DateTime      @default(now())
+  
+  // Umami sync status
+  forwardedToUmami    Boolean       @default(false)
+  
+  @@index([customerHash, timestamp])
+  @@index([sessionId, timestamp])
+  @@index([eventType, timestamp])
+  @@index([orderId])
+  @@index([source])
+  @@index([timestamp])
+  @@index([country])
+  @@index([deviceType])
+}
+
+// Customer journey summary (for quick lookups)
+model CustomerJourney {
+  id                  String        @id @default(uuid())
+  shopConfigId        String
+  shopConfig          ShopConfig    @relation(fields: [shopConfigId], references: [id], onDelete: Cascade)
+  
+  customerHash        String        // SHA256 hashed email
+  
+  // Journey stats
+  firstEventAt        DateTime
+  lastEventAt         DateTime
+  totalEvents         Int
+  totalSessions       Int          @default(0)
+  
+  // Event counts by type
+  pageViewCount       Int           @default(0)
+  addToCartCount      Int           @default(0)
+  beginCheckoutCount  Int           @default(0)
+  purchaseCount       Int           @default(0)
+  refundCount         Int           @default(0)
+  cancelCount         Int           @default(0)
+  returnCount         Int           @default(0)
+  
+  // Payment method breakdown
+  onlinePaymentCount  Int           @default(0)
+  codPaymentCount     Int           @default(0)
+  
+  // Purchase data
+  totalOrderValue     Float         @default(0)
+  totalOrdersCompleted Int          @default(0)
+  totalOrdersCancelled Int          @default(0)
+  totalOrdersRefunded Int           @default(0)
+  
+  // RFM Analysis (Recency, Frequency, Monetary)
+  recency             Int?          // Days since last purchase
+  frequency           Int           @default(0)  // Number of purchases
+  monetaryValue       Float         @default(0)  // Total spent
+  rfmScore            String?       // e.g., "5-5-5" (max score for each: 5)
+  rfmSegment          String?       // "Champions", "Loyal", "Potential", "At Risk", "Lost"
+  
+  // Multi-touch attribution
+  firstTouchSource    String?
+  firstTouchMedium    String?
+  firstTouchCampaign  String?
+  firstTouchChannel   String?       // "organic", "paid", "direct", "social", etc.
+  
+  lastTouchSource     String?
+  lastTouchMedium     String?
+  lastTouchCampaign   String?
+  lastTouchChannel    String?       // Last touch channel
+  
+  // Attribution model weights
+  linearAttributionSource    String?  // Linear touch attribution
+  timeDecayAttributionSource String?  // Time decay model
+  
+  // Cohort information
+  cohortDate          DateTime?     // First purchase date (for cohort analysis)
+  cohortSize          Int           @default(0)  // For cohort group size
+  
+  // Device preferences
+  preferredDevice     String?       // Most used device type
+  preferredBrowser    String?       // Most used browser
+  preferredCountry    String?       // Most common location
+  
+  // Customer value & risk
+  lifetimeValue       Float         @default(0)  // Predicted or calculated LTV
+  churnRisk           String        @default("low")  // low, medium, high
+  
+  // Engagement metrics
+  averageOrderValue   Float         @default(0)
+  daysAsCustomer      Int           @default(0)
+  repeatPurchaseRate  Float         @default(0)  // % of repeat customers
+  avgTimeToRepurchase Int?          // Days between purchases
+  
+  // Attribution
+  isReturningCustomer Boolean       @default(false)
+  firstTimeCustomer   Boolean       @default(false)
+  
+  // Status
+  lastSyncedAt        DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+  
+  @@unique([shopConfigId, customerHash])
+  @@index([firstEventAt])
+  @@index([lastEventAt])
+  @@index([rfmScore])
+  @@index([rfmSegment])
+  @@index([cohortDate])
+  @@index([lifetimeValue])
+  @@index([churnRisk])
+}
+
+// Data Retention Policy (GDPR & privacy compliance)
+model DataRetentionPolicy {
+  id                  String        @id @default(uuid())
+  shopConfigId        String
+  shopConfig          ShopConfig    @relation(fields: [shopConfigId], references: [id], onDelete: Cascade)
+  
+  dataType            String        // "events", "personal_data", "payment_data", "logs", "deleted_data"
+  retentionDays       Int           // How long to keep data
+  deleteAfterDays     Int?          // Auto-delete after X days
+  anonymizeAfterDays  Int?          // Anonymize instead of delete after X days
+  
+  policy              String?       // JSON with detailed policy
+  gdprCompliant       Boolean       @default(true)
+  ccpaCompliant       Boolean       @default(true)
+  
+  enabled             Boolean       @default(true)
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+  
+  @@unique([shopConfigId, dataType])
+}
+
+// Customer Segments (for behavioral segmentation, RFM, etc.)
+model CustomerSegment {
+  id                  String        @id @default(uuid())
+  shopConfigId        String
+  shopConfig          ShopConfig    @relation(fields: [shopConfigId], references: [id], onDelete: Cascade)
+  
+  name                String        // "High Value", "Churners", "At Risk", "New Users", etc.
+  description         String?
+  segmentType         String        // "manual", "rfm", "behavioral", "predictive", "cohort"
+  
+  // Segment criteria (JSON for flexibility)
+  criteria            String        // JSON: { minLTV: 500, maxDaysActive: 30, minPurchases: 2, etc. }
+  
+  // Segment stats
+  totalCount          Int           @default(0)
+  lastUpdatedAt       DateTime      @default(now())
+  
+  enabled             Boolean       @default(true)
+  priority            Int           @default(0)  // For targeted campaigns
+  
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+  
+  @@unique([shopConfigId, name])
+  @@index([segmentType])
+}
+
+// Cohort Analysis (track groups of users acquired in same period)
+model CohortAnalysis {
+  id                  String        @id @default(uuid())
+  shopConfigId        String
+  
+  cohortDate          DateTime      // When cohort started (e.g., week of acquisition)
+  cohortSize          Int           @default(0)  // Initial cohort size
+  cohortName          String        // e.g., "Jan2024_Week1"
+  
+  // Retention metrics at different time periods
+  day0Retention       Int           @default(0)  // Day of acquisition
+  day1Retention       Int           @default(0)
+  day7Retention       Int           @default(0)
+  day30Retention      Int           @default(0)
+  day90Retention      Int           @default(0)
+  
+  // Revenue metrics
+  day0Revenue         Float         @default(0)
+  day7Revenue         Float         @default(0)
+  day30Revenue        Float         @default(0)
+  day90Revenue        Float         @default(0)
+  
+  // Churn metrics
+  churnRate           Float         @default(0)  // % churned
+  repeatPurchaseRate  Float         @default(0)
+  
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+  
+  @@index([cohortDate])
+  @@index([shopConfigId])
+}
+
+// Event Versioning (for schema evolution tracking)
+model EventSchema {
+  id                  String        @id @default(uuid())
+  
+  eventType           String        // "page_view", "purchase", etc.
+  version             String        // "1.0", "1.1", "2.0", etc.
+  
+  schema              String        // JSON schema for event validation
+  description         String?
+  
+  createdAt           DateTime      @default(now())
+  deprecatedAt        DateTime?     // When this schema was deprecated
+  
+  @@unique([eventType, version])
+  @@index([deprecatedAt])
+}
+
+// Customer Lifecycle Stages (for funnel and retention analysis)
+model CustomerLifecycle {
+  id                  String        @id @default(uuid())
+  
+  customerHash        String
+  shopConfigId        String
+  
+  // Lifecycle stage
+  stage               String        // "prospect", "customer", "loyal", "at_risk", "churned", "reactivated"
+  
+  // Stage transition
+  enteredAt           DateTime
+  exitedAt            DateTime?
+  daysInStage         Int           @default(0)
+  
+  // Trigger details
+  triggerEvent        String?       // Event that triggered transition
+  triggerData         String?       // JSON with trigger context
+  
+  createdAt           DateTime      @default(now())
+  
+  @@index([customerHash, stage])
+  @@index([stage, enteredAt])
+  @@index([shopConfigId])
+}
+
+// A/B Testing Framework (for experiment tracking)
+model Experiment {
+  id                  String        @id @default(uuid())
+  shopConfigId        String
+  
+  name                String
+  description         String?
+  
+  // Experiment setup
+  startDate           DateTime
+  endDate             DateTime?
+  status              String        // "draft", "running", "paused", "completed"
+  
+  // Variants
+  controlGroup        String        // Variant A
+  treatmentGroup      String        // Variant B
+  
+  // Allocation
+  trafficPercentage   Int           @default(50)  // % of traffic for experiment
+  
+  // Metrics to track
+  primaryMetric       String        // "conversion_rate", "aov", "ltv", etc.
+  secondaryMetrics    String?       // JSON array
+  
+  // Results (updated as experiment runs)
+  controlConversions  Int           @default(0)
+  treatmentConversions Int          @default(0)
+  statisticalSignificance Float?    // p-value
+  winnerVariant       String?       // Which variant won
+  
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+  
+  @@index([status, startDate])
+}
+
+// Funnel Analysis (predefined or custom funnels)
+model FunnelDefinition {
+  id                  String        @id @default(uuid())
+  shopConfigId        String
+  
+  name                String        // "Purchase Funnel", "Onboarding Funnel", etc.
+  description         String?
+  
+  // Funnel steps (JSON ordered array)
+  steps               String        // JSON: [{ step: 1, eventType: "page_view", name: "Landing" }, ...]
+  
+  // Funnel analysis window
+  conversionWindow    Int           @default(30)  // Days to complete funnel
+  
+  enabled             Boolean       @default(true)
+  
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+  
+  @@unique([shopConfigId, name])
+}
+
+// Event Replay Log (for debugging and compliance audit)
+model EventReplay {
+  id                  String        @id @default(uuid())
+  shopConfigId        String
+  
+  originalEventId     String        // Reference to original event
+  customerHash        String        // Hashed for privacy
+  
+  eventType           String
+  eventData           String        // Full event payload
+  
+  // Replay information
+  replayedAt          DateTime      @default(now())
+  replayReason        String        // "duplicate_fix", "data_correction", "testing", "audit"
+  replayedBy          String?       // User who initiated replay
+  
+  createdAt           DateTime      @default(now())
+  
+  @@index([customerHash, replayedAt])
+  @@index([originalEventId])
+}
+
 // Health monitoring
 model HealthLog {
   id                  String        @id @default(uuid())
   shopifyShop         String
   
-  component           String        // "pixel", "webhook", "umami_forward"
+  component           String        // "pixel", "webhook", "umami_forward", "attribution", "cohort"
   status              String        // "success", "error", "warning"
   message             String
   details             String?       // JSON
