@@ -134,10 +134,14 @@ async function handlePixelIngestion(req, res) {
       return res.status(200).json({ message: "Pixel tracking disabled" });
     }
 
-    console.log(`[Pixel] Received ${pixelEvent.name} from ${normalizedShop}`);
+    const shopKey = shopConfig.shopifyShop;
 
-    // Deduplication key
-    const eventKey = `${normalizedShop}:pixel:${pixelEvent.name}:${
+    console.log(
+      `[Pixel] Received ${pixelEvent.name} from ${shopKey} (domain ${normalizedShop})`
+    );
+
+    // Deduplication key — always use myshopify domain for consistency
+    const eventKey = `${shopKey}:pixel:${pixelEvent.name}:${
       pixelEvent.id || Date.now()
     }`;
 
