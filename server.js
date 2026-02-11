@@ -160,6 +160,11 @@ async function handlePixelIngestion(req, res) {
       referrer
     );
 
+    // Extract device/browser/IP from the HTTP request
+    const userAgent = req.headers["user-agent"] || "";
+    const deviceInfo = parseUserAgent(userAgent);
+    const ipHash = hashIp(req);
+
     // Extract checkout/order data for conversion events
     const checkout = pixelEvent.data?.checkout;
     const pixelOrderId = checkout?.order?.id
@@ -239,6 +244,13 @@ async function handlePixelIngestion(req, res) {
             utmCampaign: utmParams.utmCampaign || null,
             utmTerm: utmParams.utmTerm || null,
             utmContent: utmParams.utmContent || null,
+            // Device & browser info (from HTTP User-Agent)
+            deviceType: deviceInfo.deviceType || null,
+            browser: deviceInfo.browser || null,
+            browserVersion: deviceInfo.browserVersion || null,
+            os: deviceInfo.os || null,
+            osVersion: deviceInfo.osVersion || null,
+            ipHash: ipHash || null,
             value: pixelValue || null,
             currency: pixelValue ? pixelCurrency : null,
             itemsCount: checkout?.lineItems?.length || null,
@@ -303,6 +315,11 @@ async function handlePixelIngestion(req, res) {
             medium: channelInfo.medium || null,
             campaign: utmParams.utmCampaign || null,
             content: utmParams.utmContent || null,
+            // Device & browser info
+            deviceType: deviceInfo.deviceType || null,
+            browser: deviceInfo.browser || null,
+            os: deviceInfo.os || null,
+            ipHash: ipHash || null,
             attributionWeight: 0, // Weights computed later when order completes
             attributionModel: "pending",
             touchAt: new Date(),
@@ -642,6 +659,73 @@ async function ensureShopConfig(db, shopDomain) {
 // ---------------------------------------------------------------------------
 function hashSessionId(sessionId) {
   return crypto.createHash("sha256").update(sessionId).digest("hex");
+}
+
+// ---------------------------------------------------------------------------
+// Helper: hash an IP address for privacy (SHA-256)
+// ---------------------------------------------------------------------------
+function hashIp(req) {
+  const ip =
+    req.headers["x-forwarded-for"]?.split(",")[0]?.trim() ||
+    req.headers["x-real-ip"] ||
+    req.socket?.remoteAddress ||
+    "";
+  if (!ip) return null;
+  return crypto.createHash("sha256").update(ip).digest("hex");
+}
+
+// ---------------------------------------------------------------------------
+// Helper: parse User-Agent string into device/browser/OS info
+// No external dependency — lightweight regex-based parser
+// ---------------------------------------------------------------------------
+function parseUserAgent(ua) {
+  if (!ua) return {};
+
+  const result = {};
+
+  // Device type
+  if (/mobile|android.*mobile|iphone|ipod|blackberry|iemobile|opera mini/i.test(ua)) {
+    result.deviceType = "mobile";
+  } else if (/ipad|android(?!.*mobile)|tablet/i.test(ua)) {
+    result.deviceType = "tablet";
+  } else {
+    result.deviceType = "desktop";
+  }
+
+  // Browser + version
+  let match;
+  if ((match = ua.match(/(?:edge|edg)\/([\d.]+)/i))) {
+    result.browser = "Edge"; result.browserVersion = match[1];
+  } else if ((match = ua.match(/opr\/([\d.]+)/i)) || (match = ua.match(/opera\/([\d.]+)/i))) {
+    result.browser = "Opera"; result.browserVersion = match[1];
+  } else if ((match = ua.match(/chrome\/([\d.]+)/i))) {
+    result.browser = "Chrome"; result.browserVersion = match[1];
+  } else if ((match = ua.match(/safari\/([\d.]+)/i)) && !/chrome/i.test(ua)) {
+    result.browser = "Safari"; result.browserVersion = match[1];
+  } else if ((match = ua.match(/firefox\/([\d.]+)/i))) {
+    result.browser = "Firefox"; result.browserVersion = match[1];
+  } else {
+    result.browser = "Other";
+  }
+
+  // OS + version
+  if ((match = ua.match(/windows nt ([\d.]+)/i))) {
+    result.os = "Windows";
+    const winVersions = { "10.0": "10/11", "6.3": "8.1", "6.2": "8", "6.1": "7" };
+    result.osVersion = winVersions[match[1]] || match[1];
+  } else if ((match = ua.match(/mac os x ([\d_.]+)/i))) {
+    result.os = "macOS"; result.osVersion = match[1].replace(/_/g, ".");
+  } else if ((match = ua.match(/android ([\d.]+)/i))) {
+    result.os = "Android"; result.osVersion = match[1];
+  } else if ((match = ua.match(/iphone os ([\d_]+)/i)) || (match = ua.match(/ipad.*os ([\d_]+)/i))) {
+    result.os = "iOS"; result.osVersion = match[1].replace(/_/g, ".");
+  } else if (/linux/i.test(ua)) {
+    result.os = "Linux";
+  } else {
+    result.os = "Other";
+  }
+
+  return result;
 }
 
 // ---------------------------------------------------------------------------
