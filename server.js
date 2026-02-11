@@ -343,6 +343,20 @@ async function handlePixelIngestion(req, res) {
       } catch (cjErr) {
         console.error("[Pixel] CustomerJourney upsert error:", cjErr.message);
       }
+
+      // ── Update CustomerLifecycle ──
+      await updateCustomerLifecycle(
+        db,
+        shopConfig.id,
+        customerHash,
+        pixelEvent.name,
+        {
+          source: "pixel",
+          sessionId,
+          orderId: pixelOrderId || undefined,
+          value: pixelValue || undefined,
+        }
+      );
     }
 
     // Forward to Umami
@@ -497,6 +511,83 @@ async function ensureShopConfig(db, shopDomain) {
 // ---------------------------------------------------------------------------
 function hashSessionId(sessionId) {
   return crypto.createHash("sha256").update(sessionId).digest("hex");
+}
+
+// ---------------------------------------------------------------------------
+// Helper: update CustomerLifecycle stage transitions
+// Stages: prospect → customer → loyal → at_risk → churned → reactivated
+// ---------------------------------------------------------------------------
+async function updateCustomerLifecycle(db, shopConfigId, customerHash, triggerEvent, triggerData) {
+  try {
+    // Get customer's current lifecycle stage (most recent without exitedAt)
+    const currentStage = await db.customerLifecycle.findFirst({
+      where: { customerHash, shopConfigId, exitedAt: null },
+      orderBy: { enteredAt: "desc" },
+    });
+
+    // Get customer's purchase history for stage determination
+    const profile = await db.customerProfile.findUnique({
+      where: {
+        shopConfigId_customerHash: { shopConfigId, customerHash },
+      },
+      select: { totalOrderCount: true, lastActivityDate: true },
+    });
+
+    const totalOrders = profile?.totalOrderCount || 0;
+    const currentStageName = currentStage?.stage || null;
+
+    // Determine what the new stage should be
+    let nextStage = null;
+
+    if (triggerEvent === "purchase" || triggerEvent === "order_created" || triggerEvent === "checkout_completed") {
+      // Purchase events
+      if (currentStageName === "churned" || currentStageName === "at_risk") {
+        nextStage = "reactivated";
+      } else if (totalOrders > 1) {
+        nextStage = "loyal";
+      } else {
+        nextStage = "customer";
+      }
+    } else if (!currentStageName) {
+      // First ever event — they're a prospect
+      nextStage = "prospect";
+    }
+
+    // No change needed
+    if (!nextStage || nextStage === currentStageName) return;
+
+    const now = new Date();
+
+    // Exit the current stage
+    if (currentStage) {
+      const daysInStage = Math.floor(
+        (now.getTime() - new Date(currentStage.enteredAt).getTime()) /
+          (1000 * 60 * 60 * 24)
+      );
+      await db.customerLifecycle.update({
+        where: { id: currentStage.id },
+        data: { exitedAt: now, daysInStage },
+      });
+    }
+
+    // Enter the new stage
+    await db.customerLifecycle.create({
+      data: {
+        customerHash,
+        shopConfigId,
+        stage: nextStage,
+        enteredAt: now,
+        triggerEvent: triggerEvent || null,
+        triggerData: triggerData ? JSON.stringify(triggerData) : null,
+      },
+    });
+
+    console.log(
+      `[Lifecycle] ${customerHash.substring(0, 8)}… ${currentStageName || "(new)"} → ${nextStage}`
+    );
+  } catch (err) {
+    console.error("[Lifecycle] updateCustomerLifecycle error:", err.message);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -913,6 +1004,21 @@ async function handleShopifyWebhook(req, res, rawBody) {
       } catch (cjErr) {
         console.error("[Webhook] CustomerJourney upsert error:", cjErr.message);
       }
+
+      // ── Update CustomerLifecycle ──
+      await updateCustomerLifecycle(
+        db,
+        shopConfig.id,
+        effectiveCustomerHash,
+        eventName,
+        {
+          source: "webhook",
+          orderId,
+          orderNumber: payload.order_number,
+          value: totalPrice,
+          currency,
+        }
+      );
     }
 
     // ── Forward to Umami ──
@@ -1051,6 +1157,115 @@ async function handleShopifyWebhook(req, res, rawBody) {
     return res.status(500).json({ error: "Internal server error" });
   }
 }
+
+// ---------------------------------------------------------------------------
+// Scheduled job: detect at_risk / churned customers (runs every 6 hours)
+// - No activity for 14 days  → at_risk
+// - No activity for 45 days  → churned
+// ---------------------------------------------------------------------------
+const AT_RISK_DAYS = 14;
+const CHURNED_DAYS = 45;
+const LIFECYCLE_CRON_INTERVAL = 6 * 60 * 60 * 1000; // 6 hours
+
+async function runLifecycleCronJob() {
+  const db = getPrisma();
+  const now = new Date();
+  const atRiskCutoff = new Date(now.getTime() - AT_RISK_DAYS * 24 * 60 * 60 * 1000);
+  const churnedCutoff = new Date(now.getTime() - CHURNED_DAYS * 24 * 60 * 60 * 1000);
+
+  console.log(`[Lifecycle Cron] Running churn detection (at_risk=${AT_RISK_DAYS}d, churned=${CHURNED_DAYS}d)`);
+
+  try {
+    // Find all active customers (with a CustomerProfile) who have gone quiet
+    const inactiveProfiles = await db.customerProfile.findMany({
+      where: {
+        lastActivityDate: { lt: atRiskCutoff },
+      },
+      select: {
+        shopConfigId: true,
+        customerHash: true,
+        lastActivityDate: true,
+      },
+    });
+
+    let atRiskCount = 0;
+    let churnedCount = 0;
+
+    for (const profile of inactiveProfiles) {
+      // Check their current lifecycle stage
+      const current = await db.customerLifecycle.findFirst({
+        where: {
+          customerHash: profile.customerHash,
+          shopConfigId: profile.shopConfigId,
+          exitedAt: null,
+        },
+        orderBy: { enteredAt: "desc" },
+      });
+
+      const currentStage = current?.stage || "prospect";
+      const lastActivity = profile.lastActivityDate || now;
+      const daysSinceActivity = Math.floor(
+        (now.getTime() - new Date(lastActivity).getTime()) / (1000 * 60 * 60 * 24)
+      );
+
+      let nextStage = null;
+
+      if (daysSinceActivity >= CHURNED_DAYS && currentStage !== "churned") {
+        nextStage = "churned";
+        churnedCount++;
+      } else if (
+        daysSinceActivity >= AT_RISK_DAYS &&
+        daysSinceActivity < CHURNED_DAYS &&
+        currentStage !== "at_risk" &&
+        currentStage !== "churned"
+      ) {
+        nextStage = "at_risk";
+        atRiskCount++;
+      }
+
+      if (nextStage) {
+        // Exit current stage
+        if (current) {
+          const daysInStage = Math.floor(
+            (now.getTime() - new Date(current.enteredAt).getTime()) /
+              (1000 * 60 * 60 * 24)
+          );
+          await db.customerLifecycle.update({
+            where: { id: current.id },
+            data: { exitedAt: now, daysInStage },
+          });
+        }
+
+        // Enter new stage
+        await db.customerLifecycle.create({
+          data: {
+            customerHash: profile.customerHash,
+            shopConfigId: profile.shopConfigId,
+            stage: nextStage,
+            enteredAt: now,
+            triggerEvent: "inactivity_cron",
+            triggerData: JSON.stringify({
+              daysSinceActivity,
+              lastActivityDate: lastActivity,
+            }),
+          },
+        });
+      }
+    }
+
+    console.log(
+      `[Lifecycle Cron] Complete: checked ${inactiveProfiles.length} inactive profiles → ${atRiskCount} at_risk, ${churnedCount} churned`
+    );
+  } catch (err) {
+    console.error("[Lifecycle Cron] Error:", err.message);
+  }
+}
+
+// Schedule the cron job (starts 60s after boot, then every 6 hours)
+setTimeout(() => {
+  runLifecycleCronJob();
+  setInterval(runLifecycleCronJob, LIFECYCLE_CRON_INTERVAL);
+}, 60_000);
 
 // ---------------------------------------------------------------------------
 // Express app
