@@ -939,6 +939,20 @@ async function handleShopifyWebhook(req, res, rawBody) {
         .digest("hex");
     }
 
+    // Extract customer address from webhook payload
+    const addr =
+      payload.shipping_address ||
+      payload.billing_address ||
+      payload.customer?.default_address ||
+      {};
+    const custFirstName = payload.customer?.first_name || addr.first_name || null;
+    const custLastName = payload.customer?.last_name || addr.last_name || null;
+    const custCountry = addr.country || addr.country_code || null;
+    const custState = addr.province || addr.province_code || null;
+    const custCity = addr.city || null;
+    const custZipCode = addr.zip || null;
+    const custPhone = payload.customer?.phone || addr.phone || null;
+
     // Build dedupe key
     const eventKey = `${shop}:webhook:${eventName}:${orderId || Date.now()}`;
 
@@ -1015,6 +1029,9 @@ async function handleShopifyWebhook(req, res, rawBody) {
             value: totalPrice || null,
             currency: currency || null,
             itemsCount: itemsCount || null,
+            country: custCountry || null,
+            region: custState || null,
+            city: custCity || null,
             source: "webhook",
             eventData: JSON.stringify({
               order_number: payload.order_number,
@@ -1109,7 +1126,7 @@ async function handleShopifyWebhook(req, res, rawBody) {
       }
     }
 
-    // ── Upsert CustomerProfile ──
+    // ── Upsert CustomerProfile (with address + name from webhook) ──
     if (effectiveCustomerHash) {
       try {
         const isPurchase = eventName === "purchase";
@@ -1130,6 +1147,17 @@ async function handleShopifyWebhook(req, res, rawBody) {
         const averageOrderValue =
           totalOrderCount > 0 ? totalOrderValue / totalOrderCount : 0;
 
+        // Build address fields — only overwrite if we have new data
+        const profileGeo = {};
+        if (custCountry) profileGeo.country = custCountry;
+        if (custState) profileGeo.state = custState;
+        if (custCity) profileGeo.city = custCity;
+        if (custZipCode) profileGeo.zipCode = custZipCode;
+        if (custFirstName) profileGeo.firstName = custFirstName;
+        if (custLastName) profileGeo.lastName = custLastName;
+        if (custPhone) profileGeo.phone = custPhone;
+        if (customerEmail) profileGeo.email = customerEmail;
+
         await db.customerProfile.upsert({
           where: {
             shopConfigId_customerHash: {
@@ -1143,6 +1171,7 @@ async function handleShopifyWebhook(req, res, rawBody) {
             totalOrderValue,
             averageOrderValue,
             lifetimeValue: totalOrderValue,
+            ...profileGeo,
             ...(isPurchase
               ? {
                   lastOrderDate: new Date(),
@@ -1161,6 +1190,7 @@ async function handleShopifyWebhook(req, res, rawBody) {
             firstOrderDate: isPurchase ? new Date() : null,
             lastOrderDate: isPurchase ? new Date() : null,
             repeatCustomer: false,
+            ...profileGeo,
           },
         });
       } catch (cpErr) {
