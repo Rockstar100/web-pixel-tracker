@@ -152,6 +152,14 @@ async function handlePixelIngestion(req, res) {
     const referrer = pixelEvent.context?.document?.referrer || "";
     const urlSearch = pixelEvent.context?.document?.location?.search || "";
 
+    // Extract UTM parameters from URL search string
+    const utmParams = extractUtmParams(urlSearch);
+    const channelInfo = classifyChannel(
+      utmParams.utmSource,
+      utmParams.utmMedium,
+      referrer
+    );
+
     // Extract checkout/order data for conversion events
     const checkout = pixelEvent.data?.checkout;
     const pixelOrderId = checkout?.order?.id
@@ -197,11 +205,12 @@ async function handlePixelIngestion(req, res) {
       console.error("[Pixel] DB store error:", storeErr);
     }
 
-    // ── Store to CustomerEvent (same table the React Router route uses) ──
+    // ── Store to CustomerEvent (enriched with UTM + channel) ──
     const customerHash = sessionId ? hashSessionId(sessionId) : null;
+    let createdEventId = null;
     if (customerHash) {
       try {
-        await db.customerEvent.create({
+        const ce = await db.customerEvent.create({
           data: {
             shopConfigId: shopConfig.id,
             customerHash,
@@ -224,6 +233,12 @@ async function handlePixelIngestion(req, res) {
             pageReferrer: referrer || null,
             orderId: pixelOrderId || null,
             checkoutId: checkout?.token || null,
+            // UTM attribution
+            utmSource: utmParams.utmSource || null,
+            utmMedium: utmParams.utmMedium || null,
+            utmCampaign: utmParams.utmCampaign || null,
+            utmTerm: utmParams.utmTerm || null,
+            utmContent: utmParams.utmContent || null,
             value: pixelValue || null,
             currency: pixelValue ? pixelCurrency : null,
             itemsCount: checkout?.lineItems?.length || null,
@@ -231,8 +246,85 @@ async function handlePixelIngestion(req, res) {
             eventData: JSON.stringify(pixelEvent.data || {}),
           },
         });
+        createdEventId = ce.id;
       } catch (ceErr) {
         console.error("[Pixel] CustomerEvent store error:", ceErr.message);
+      }
+
+      // ── Create Attribution record (first/last touch tracking) ──
+      if (utmParams.utmSource || referrer) {
+        try {
+          // Check if this is the first touch for this customer
+          const existingAttr = await db.attribution.findFirst({
+            where: { customerHash, shopConfigId: shopConfig.id },
+            orderBy: { capturedAt: "asc" },
+          });
+
+          await db.attribution.create({
+            data: {
+              shopConfigId: shopConfig.id,
+              sessionId,
+              customerHash,
+              orderId: pixelOrderId || null,
+              utmSource: utmParams.utmSource || null,
+              utmMedium: utmParams.utmMedium || null,
+              utmCampaign: utmParams.utmCampaign || null,
+              utmTerm: utmParams.utmTerm || null,
+              utmContent: utmParams.utmContent || null,
+              firstTouch: !existingAttr, // true if this is the first attribution record
+              landingPage: pageUrl,
+              referrer: referrer || null,
+            },
+          });
+        } catch (attrErr) {
+          console.error("[Pixel] Attribution store error:", attrErr.message);
+        }
+      }
+
+      // ── Create MultiTouchAttribution record (every touchpoint) ──
+      try {
+        // Count existing touches for this customer to determine position
+        const touchCount = await db.multiTouchAttribution.count({
+          where: { customerHash, shopConfigId: shopConfig.id },
+        });
+
+        const mta = await db.multiTouchAttribution.create({
+          data: {
+            shopConfigId: shopConfig.id,
+            customerHash,
+            orderId: pixelOrderId || null,
+            touchPosition: touchCount + 1,
+            touchType:
+              referrer ? "referral"
+                : utmParams.utmSource ? "click"
+                  : "direct",
+            channel: channelInfo.channel,
+            source: channelInfo.source,
+            medium: channelInfo.medium || null,
+            campaign: utmParams.utmCampaign || null,
+            content: utmParams.utmContent || null,
+            attributionWeight: 0, // Weights computed later when order completes
+            attributionModel: "pending",
+            touchAt: new Date(),
+          },
+        });
+
+        // ── Link event to attribution (CustomerEventAttribution) ──
+        if (createdEventId && mta) {
+          try {
+            await db.customerEventAttribution.create({
+              data: {
+                shopConfigId: shopConfig.id,
+                eventId: createdEventId,
+                attributionId: mta.id,
+                touchPosition: touchCount + 1,
+                attributionWeight: 0,
+              },
+            });
+          } catch { /* ignore link error */ }
+        }
+      } catch (mtaErr) {
+        console.error("[Pixel] MultiTouchAttribution store error:", mtaErr.message);
       }
 
       // ── Upsert CustomerProfile ──
@@ -291,13 +383,33 @@ async function handlePixelIngestion(req, res) {
         console.error("[Pixel] CustomerProfile upsert error:", cpErr.message);
       }
 
-      // ── Upsert CustomerJourney ──
+      // ── Upsert CustomerJourney (with attribution fields) ──
       try {
         const now = new Date();
         const isPageView = pixelEvent.name === "page_viewed";
         const isAddToCart = pixelEvent.name === "product_added_to_cart";
         const isCheckoutStart = pixelEvent.name === "checkout_started";
         const isPurchase = pixelEvent.name === "checkout_completed";
+
+        // Check if journey already exists (to decide first vs last touch)
+        const existingJourney = await db.customerJourney.findUnique({
+          where: {
+            shopConfigId_customerHash: {
+              shopConfigId: shopConfig.id,
+              customerHash,
+            },
+          },
+          select: { firstTouchSource: true },
+        });
+
+        const lastTouchUpdate = (utmParams.utmSource || channelInfo.channel !== "direct")
+          ? {
+              lastTouchSource: utmParams.utmSource || channelInfo.source,
+              lastTouchMedium: utmParams.utmMedium || channelInfo.medium,
+              lastTouchCampaign: utmParams.utmCampaign || null,
+              lastTouchChannel: channelInfo.channel,
+            }
+          : {};
 
         await db.customerJourney.upsert({
           where: {
@@ -323,6 +435,16 @@ async function handlePixelIngestion(req, res) {
                   monetaryValue: { increment: pixelValue || 0 },
                 }
               : {}),
+            ...lastTouchUpdate,
+            // Update first touch only if it was never set
+            ...(!existingJourney?.firstTouchSource && (utmParams.utmSource || channelInfo.channel !== "direct")
+              ? {
+                  firstTouchSource: utmParams.utmSource || channelInfo.source,
+                  firstTouchMedium: utmParams.utmMedium || channelInfo.medium,
+                  firstTouchCampaign: utmParams.utmCampaign || null,
+                  firstTouchChannel: channelInfo.channel,
+                }
+              : {}),
           },
           create: {
             shopConfigId: shopConfig.id,
@@ -338,6 +460,15 @@ async function handlePixelIngestion(req, res) {
             totalOrdersCompleted: isPurchase ? 1 : 0,
             frequency: isPurchase ? 1 : 0,
             monetaryValue: isPurchase ? pixelValue || 0 : 0,
+            // Attribution
+            firstTouchSource: utmParams.utmSource || channelInfo.source,
+            firstTouchMedium: utmParams.utmMedium || channelInfo.medium,
+            firstTouchCampaign: utmParams.utmCampaign || null,
+            firstTouchChannel: channelInfo.channel,
+            lastTouchSource: utmParams.utmSource || channelInfo.source,
+            lastTouchMedium: utmParams.utmMedium || channelInfo.medium,
+            lastTouchCampaign: utmParams.utmCampaign || null,
+            lastTouchChannel: channelInfo.channel,
           },
         });
       } catch (cjErr) {
@@ -511,6 +642,93 @@ async function ensureShopConfig(db, shopDomain) {
 // ---------------------------------------------------------------------------
 function hashSessionId(sessionId) {
   return crypto.createHash("sha256").update(sessionId).digest("hex");
+}
+
+// ---------------------------------------------------------------------------
+// Helper: extract UTM parameters from a URL search string
+// ---------------------------------------------------------------------------
+function extractUtmParams(searchString) {
+  if (!searchString) return {};
+  try {
+    const params = new URLSearchParams(searchString);
+    return {
+      utmSource: params.get("utm_source") || null,
+      utmMedium: params.get("utm_medium") || null,
+      utmCampaign: params.get("utm_campaign") || null,
+      utmTerm: params.get("utm_term") || null,
+      utmContent: params.get("utm_content") || null,
+      gclid: params.get("gclid") || null,
+      fbclid: params.get("fbclid") || null,
+      ttclid: params.get("ttclid") || null,
+    };
+  } catch {
+    return {};
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Helper: classify marketing channel from UTM params + referrer
+// Returns { channel, source, medium, platform }
+// ---------------------------------------------------------------------------
+function classifyChannel(utmSource, utmMedium, referrer) {
+  const src = (utmSource || "").toLowerCase();
+  const med = (utmMedium || "").toLowerCase();
+  const ref = (referrer || "").toLowerCase();
+
+  // Paid channels (have utm_medium indicating paid)
+  if (med === "cpc" || med === "ppc" || med === "paid" || med === "cpm" || med === "cpv") {
+    if (src.includes("google") || src.includes("adwords"))
+      return { channel: "paid_search", source: src || "google", medium: med, platform: "google" };
+    if (src.includes("facebook") || src.includes("fb") || src.includes("meta") || src.includes("instagram") || src.includes("ig"))
+      return { channel: "paid_social", source: src || "facebook", medium: med, platform: "meta" };
+    if (src.includes("tiktok") || src.includes("tt"))
+      return { channel: "paid_social", source: src || "tiktok", medium: med, platform: "tiktok" };
+    if (src.includes("twitter") || src.includes("x.com"))
+      return { channel: "paid_social", source: src || "twitter", medium: med, platform: "twitter" };
+    if (src.includes("linkedin"))
+      return { channel: "paid_social", source: src || "linkedin", medium: med, platform: "linkedin" };
+    if (src.includes("bing") || src.includes("yahoo"))
+      return { channel: "paid_search", source: src || "bing", medium: med, platform: src };
+    return { channel: "paid_other", source: src || "unknown", medium: med, platform: src || null };
+  }
+
+  // Email
+  if (med === "email" || src.includes("email") || src.includes("klaviyo") || src.includes("mailchimp"))
+    return { channel: "email", source: src || "email", medium: med || "email", platform: "email" };
+
+  // Affiliate
+  if (med === "affiliate" || src.includes("affiliate"))
+    return { channel: "affiliate", source: src || "affiliate", medium: med || "affiliate", platform: null };
+
+  // SMS
+  if (med === "sms" || src.includes("sms"))
+    return { channel: "sms", source: src || "sms", medium: med || "sms", platform: null };
+
+  // Organic social (has UTM source but not paid)
+  if (src.includes("facebook") || src.includes("instagram") || src.includes("tiktok") ||
+      src.includes("twitter") || src.includes("linkedin") || src.includes("pinterest") ||
+      src.includes("youtube") || src.includes("reddit"))
+    return { channel: "organic_social", source: src, medium: med || "social", platform: src };
+
+  // Has UTM source but couldn't classify further
+  if (src)
+    return { channel: "referral", source: src, medium: med || "referral", platform: null };
+
+  // No UTM — classify from referrer
+  if (ref) {
+    if (ref.includes("google.") || ref.includes("bing.") || ref.includes("yahoo.") ||
+        ref.includes("duckduckgo.") || ref.includes("baidu."))
+      return { channel: "organic_search", source: ref.match(/\/\/(www\.)?([^/]+)/)?.[2] || "search", medium: "organic", platform: null };
+    if (ref.includes("facebook.") || ref.includes("instagram.") || ref.includes("tiktok.") ||
+        ref.includes("twitter.") || ref.includes("linkedin.") || ref.includes("pinterest.") ||
+        ref.includes("youtube.") || ref.includes("reddit.") || ref.includes("t.co"))
+      return { channel: "organic_social", source: ref.match(/\/\/(www\.)?([^/]+)/)?.[2] || "social", medium: "social", platform: null };
+    // Generic referral
+    return { channel: "referral", source: ref.match(/\/\/(www\.)?([^/]+)/)?.[2] || "unknown", medium: "referral", platform: null };
+  }
+
+  // Direct (no UTM, no referrer)
+  return { channel: "direct", source: "direct", medium: "none", platform: null };
 }
 
 // ---------------------------------------------------------------------------
@@ -1019,6 +1237,82 @@ async function handleShopifyWebhook(req, res, rawBody) {
           currency,
         }
       );
+
+      // ── Create OrderAttribution (resolve multi-touch → order credit) ──
+      if (orderId && (eventName === "purchase" || eventName === "order_created") && totalPrice) {
+        try {
+          // Get all touchpoints for this customer
+          const touches = await db.multiTouchAttribution.findMany({
+            where: { customerHash: effectiveCustomerHash, shopConfigId: shopConfig.id },
+            orderBy: { touchAt: "asc" },
+          });
+
+          if (touches.length > 0) {
+            // Compute attribution weights: last-click gets full credit
+            const lastTouch = touches[touches.length - 1];
+
+            // Create OrderAttribution for last-click model
+            await db.orderAttribution.create({
+              data: {
+                shopConfigId: shopConfig.id,
+                orderId,
+                model: "last_click",
+                channel: lastTouch.channel,
+                source: lastTouch.source,
+                medium: lastTouch.medium || null,
+                campaign: lastTouch.campaign || null,
+                content: lastTouch.content || null,
+                platform: channelInfo?.platform || null,
+                revenue: totalPrice,
+                currency,
+                attributionWeight: 1.0,
+              },
+            });
+
+            // Also create first-click attribution if different
+            if (touches.length > 1) {
+              const firstTouch = touches[0];
+              await db.orderAttribution.create({
+                data: {
+                  shopConfigId: shopConfig.id,
+                  orderId,
+                  model: "first_click",
+                  channel: firstTouch.channel,
+                  source: firstTouch.source,
+                  medium: firstTouch.medium || null,
+                  campaign: firstTouch.campaign || null,
+                  content: firstTouch.content || null,
+                  revenue: totalPrice,
+                  currency,
+                  attributionWeight: 1.0,
+                },
+              });
+            }
+
+            // Update MultiTouchAttribution weights with linear model
+            const linearWeight = 1.0 / touches.length;
+            for (const touch of touches) {
+              await db.multiTouchAttribution.update({
+                where: { id: touch.id },
+                data: {
+                  orderId,
+                  attributionWeight: linearWeight,
+                  attributionModel: "linear",
+                  timeToConversion: Math.floor(
+                    (Date.now() - new Date(touch.touchAt).getTime()) / (1000 * 60 * 60 * 24)
+                  ),
+                },
+              });
+            }
+
+            console.log(
+              `[Webhook] OrderAttribution: ${touches.length} touches → last_click=${lastTouch.channel}/${lastTouch.source}`
+            );
+          }
+        } catch (oaErr) {
+          console.error("[Webhook] OrderAttribution error:", oaErr.message);
+        }
+      }
     }
 
     // ── Forward to Umami ──
@@ -1159,6 +1453,59 @@ async function handleShopifyWebhook(req, res, rawBody) {
 }
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Auto-seed default configuration data on startup
+// ---------------------------------------------------------------------------
+async function seedDefaults() {
+  const db = getPrisma();
+
+  // Seed default AttributionModels for each ShopConfig
+  const shops = await db.shopConfig.findMany({ select: { id: true } });
+  for (const shop of shops) {
+    const models = [
+      { modelType: "first_click", name: "First Click", isDefault: false },
+      { modelType: "last_click", name: "Last Click", isDefault: true },
+      { modelType: "linear", name: "Linear", isDefault: false },
+      { modelType: "time_decay", name: "Time Decay", isDefault: false, config: JSON.stringify({ decay_rate: 0.5 }) },
+      { modelType: "position_based", name: "Position Based", isDefault: false, config: JSON.stringify({ first_weight: 0.4, middle_weight: 0.2, last_weight: 0.4 }) },
+    ];
+    for (const m of models) {
+      try {
+        await db.attributionModel.upsert({
+          where: { shopConfigId_modelType: { shopConfigId: shop.id, modelType: m.modelType } },
+          update: {},
+          create: { shopConfigId: shop.id, ...m },
+        });
+      } catch { /* ignore */ }
+    }
+
+    // Seed default FunnelDefinition
+    try {
+      await db.funnelDefinition.upsert({
+        where: { shopConfigId_name: { shopConfigId: shop.id, name: "Purchase Funnel" } },
+        update: {},
+        create: {
+          shopConfigId: shop.id,
+          name: "Purchase Funnel",
+          description: "Standard e-commerce purchase funnel",
+          steps: JSON.stringify([
+            { step: 1, eventType: "page_viewed", name: "Landing Page" },
+            { step: 2, eventType: "product_viewed", name: "Product View" },
+            { step: 3, eventType: "product_added_to_cart", name: "Add to Cart" },
+            { step: 4, eventType: "checkout_started", name: "Checkout Started" },
+            { step: 5, eventType: "checkout_completed", name: "Purchase" },
+          ]),
+          conversionWindow: 30,
+          enabled: true,
+        },
+      });
+    } catch { /* ignore */ }
+  }
+
+  console.log(`[Seed] Default AttributionModels + FunnelDefinitions seeded for ${shops.length} shops`);
+}
+
+// ---------------------------------------------------------------------------
 // Scheduled job: detect at_risk / churned customers (runs every 6 hours)
 // - No activity for 14 days  → at_risk
 // - No activity for 45 days  → churned
@@ -1261,10 +1608,278 @@ async function runLifecycleCronJob() {
   }
 }
 
-// Schedule the cron job (starts 60s after boot, then every 6 hours)
+// ---------------------------------------------------------------------------
+// Scheduled job: compute daily ChannelDailyStats rollup
+// ---------------------------------------------------------------------------
+async function runChannelDailyStatsCron() {
+  const db = getPrisma();
+  console.log("[Cron] Running ChannelDailyStats daily rollup");
+
+  try {
+    const shops = await db.shopConfig.findMany({ select: { id: true } });
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const tomorrow = new Date(today.getTime() + 24 * 60 * 60 * 1000);
+
+    for (const shop of shops) {
+      // Get today's order attributions grouped by channel+source+campaign
+      const todayOrders = await db.orderAttribution.findMany({
+        where: {
+          shopConfigId: shop.id,
+          model: "last_click",
+          createdAt: { gte: today, lt: tomorrow },
+        },
+        include: { orderTracking: { select: { firstTimeCustomer: true } } },
+      });
+
+      // Group by channel+source+campaign
+      const groups = {};
+      for (const oa of todayOrders) {
+        const key = `${oa.channel}||${oa.source}||${oa.campaign || ""}`;
+        if (!groups[key]) {
+          groups[key] = { channel: oa.channel, source: oa.source, campaign: oa.campaign, orders: 0, revenue: 0, newCustomers: 0, repeatCustomers: 0 };
+        }
+        groups[key].orders++;
+        groups[key].revenue += oa.revenue || 0;
+        if (oa.orderTracking?.firstTimeCustomer) groups[key].newCustomers++;
+        else groups[key].repeatCustomers++;
+      }
+
+      for (const g of Object.values(groups)) {
+        try {
+          // Upsert would need a unique constraint — use create and catch duplicate
+          await db.channelDailyStats.create({
+            data: {
+              shopConfigId: shop.id,
+              date: today,
+              channel: g.channel,
+              source: g.source,
+              campaign: g.campaign || null,
+              orders: g.orders,
+              newCustomers: g.newCustomers,
+              repeatCustomers: g.repeatCustomers,
+              revenue: g.revenue,
+            },
+          });
+        } catch { /* ignore if already exists */ }
+      }
+    }
+    console.log("[Cron] ChannelDailyStats rollup complete");
+  } catch (err) {
+    console.error("[Cron] ChannelDailyStats error:", err.message);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Scheduled job: compute weekly CohortAnalysis
+// ---------------------------------------------------------------------------
+async function runCohortAnalysisCron() {
+  const db = getPrisma();
+  console.log("[Cron] Running CohortAnalysis computation");
+
+  try {
+    const shops = await db.shopConfig.findMany({ select: { id: true } });
+
+    for (const shop of shops) {
+      // Get all customer journeys with at least one purchase
+      const journeys = await db.customerJourney.findMany({
+        where: { shopConfigId: shop.id },
+        select: {
+          customerHash: true,
+          firstEventAt: true,
+          purchaseCount: true,
+          totalOrderValue: true,
+          lastEventAt: true,
+        },
+      });
+
+      // Group by week of first event
+      const cohorts = {};
+      for (const j of journeys) {
+        const weekStart = new Date(j.firstEventAt);
+        weekStart.setHours(0, 0, 0, 0);
+        weekStart.setDate(weekStart.getDate() - weekStart.getDay()); // start of week (Sunday)
+        const key = weekStart.toISOString().split("T")[0];
+
+        if (!cohorts[key]) {
+          cohorts[key] = {
+            date: weekStart,
+            name: `Week_${key}`,
+            size: 0,
+            day0: 0, day1: 0, day7: 0, day30: 0, day90: 0,
+            day0Rev: 0, day7Rev: 0, day30Rev: 0, day90Rev: 0,
+            purchasers: 0,
+            repeatPurchasers: 0,
+          };
+        }
+        const c = cohorts[key];
+        c.size++;
+        c.day0++; // Everyone is retained on day 0
+
+        const daysSinceFirst = Math.floor(
+          (Date.now() - new Date(j.firstEventAt).getTime()) / (1000 * 60 * 60 * 24)
+        );
+        const lastActiveDays = Math.floor(
+          (new Date(j.lastEventAt).getTime() - new Date(j.firstEventAt).getTime()) / (1000 * 60 * 60 * 24)
+        );
+
+        if (lastActiveDays >= 1) c.day1++;
+        if (lastActiveDays >= 7) c.day7++;
+        if (lastActiveDays >= 30) c.day30++;
+        if (lastActiveDays >= 90) c.day90++;
+
+        if (j.purchaseCount > 0) {
+          c.purchasers++;
+          c.day0Rev += j.totalOrderValue || 0;
+          if (daysSinceFirst >= 7) c.day7Rev += j.totalOrderValue || 0;
+          if (daysSinceFirst >= 30) c.day30Rev += j.totalOrderValue || 0;
+          if (daysSinceFirst >= 90) c.day90Rev += j.totalOrderValue || 0;
+        }
+        if (j.purchaseCount > 1) c.repeatPurchasers++;
+      }
+
+      // Upsert cohort records
+      for (const c of Object.values(cohorts)) {
+        try {
+          const existing = await db.cohortAnalysis.findFirst({
+            where: { shopConfigId: shop.id, cohortName: c.name },
+          });
+          if (existing) {
+            await db.cohortAnalysis.update({
+              where: { id: existing.id },
+              data: {
+                cohortSize: c.size,
+                day0Retention: c.day0, day1Retention: c.day1,
+                day7Retention: c.day7, day30Retention: c.day30, day90Retention: c.day90,
+                day0Revenue: c.day0Rev, day7Revenue: c.day7Rev,
+                day30Revenue: c.day30Rev, day90Revenue: c.day90Rev,
+                churnRate: c.size > 0 ? ((c.size - c.day7) / c.size) : 0,
+                repeatPurchaseRate: c.purchasers > 0 ? (c.repeatPurchasers / c.purchasers) : 0,
+              },
+            });
+          } else {
+            await db.cohortAnalysis.create({
+              data: {
+                shopConfigId: shop.id,
+                cohortDate: c.date,
+                cohortName: c.name,
+                cohortSize: c.size,
+                day0Retention: c.day0, day1Retention: c.day1,
+                day7Retention: c.day7, day30Retention: c.day30, day90Retention: c.day90,
+                day0Revenue: c.day0Rev, day7Revenue: c.day7Rev,
+                day30Revenue: c.day30Rev, day90Revenue: c.day90Rev,
+                churnRate: c.size > 0 ? ((c.size - c.day7) / c.size) : 0,
+                repeatPurchaseRate: c.purchasers > 0 ? (c.repeatPurchasers / c.purchasers) : 0,
+              },
+            });
+          }
+        } catch (cErr) {
+          console.error("[Cron] CohortAnalysis write error:", cErr.message);
+        }
+      }
+    }
+    console.log("[Cron] CohortAnalysis complete");
+  } catch (err) {
+    console.error("[Cron] CohortAnalysis error:", err.message);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Scheduled job: auto-compute CustomerSegments (RFM-based)
+// ---------------------------------------------------------------------------
+async function runCustomerSegmentCron() {
+  const db = getPrisma();
+  console.log("[Cron] Running CustomerSegment (RFM) computation");
+
+  try {
+    const shops = await db.shopConfig.findMany({ select: { id: true } });
+
+    // Define RFM-based segments
+    const segmentDefs = [
+      { name: "Champions", type: "rfm", criteria: { minPurchases: 4, maxRecency: 30 }, desc: "Frequent recent buyers" },
+      { name: "Loyal Customers", type: "rfm", criteria: { minPurchases: 3, maxRecency: 90 }, desc: "Regular buyers" },
+      { name: "Potential Loyalists", type: "rfm", criteria: { minPurchases: 1, maxRecency: 30 }, desc: "Recent buyers with potential" },
+      { name: "At Risk", type: "rfm", criteria: { minPurchases: 1, minRecency: 60, maxRecency: 120 }, desc: "Haven't purchased recently" },
+      { name: "Hibernating", type: "rfm", criteria: { minPurchases: 1, minRecency: 120 }, desc: "Long inactive buyers" },
+      { name: "New Visitors", type: "behavioral", criteria: { maxEvents: 5, maxPurchases: 0 }, desc: "New visitors, no purchase" },
+      { name: "Window Shoppers", type: "behavioral", criteria: { minEvents: 5, maxPurchases: 0 }, desc: "Active browsers, no purchase" },
+    ];
+
+    for (const shop of shops) {
+      const journeys = await db.customerJourney.findMany({
+        where: { shopConfigId: shop.id },
+        select: {
+          customerHash: true,
+          purchaseCount: true,
+          totalEvents: true,
+          lastEventAt: true,
+          totalOrderValue: true,
+        },
+      });
+
+      for (const seg of segmentDefs) {
+        let count = 0;
+        const c = seg.criteria;
+
+        for (const j of journeys) {
+          const recency = Math.floor(
+            (Date.now() - new Date(j.lastEventAt).getTime()) / (1000 * 60 * 60 * 24)
+          );
+          let match = true;
+
+          if (c.minPurchases !== undefined && j.purchaseCount < c.minPurchases) match = false;
+          if (c.maxPurchases !== undefined && j.purchaseCount > c.maxPurchases) match = false;
+          if (c.minRecency !== undefined && recency < c.minRecency) match = false;
+          if (c.maxRecency !== undefined && recency > c.maxRecency) match = false;
+          if (c.minEvents !== undefined && j.totalEvents < c.minEvents) match = false;
+          if (c.maxEvents !== undefined && j.totalEvents > c.maxEvents) match = false;
+
+          if (match) count++;
+        }
+
+        try {
+          await db.customerSegment.upsert({
+            where: { shopConfigId_name: { shopConfigId: shop.id, name: seg.name } },
+            update: { totalCount: count, lastUpdatedAt: new Date() },
+            create: {
+              shopConfigId: shop.id,
+              name: seg.name,
+              description: seg.desc,
+              segmentType: seg.type,
+              criteria: JSON.stringify(seg.criteria),
+              totalCount: count,
+              enabled: true,
+            },
+          });
+        } catch { /* ignore */ }
+      }
+    }
+    console.log("[Cron] CustomerSegment computation complete");
+  } catch (err) {
+    console.error("[Cron] CustomerSegment error:", err.message);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Master cron scheduler
+// ---------------------------------------------------------------------------
+
+// Schedule the lifecycle cron (starts 60s after boot, then every 6 hours)
 setTimeout(() => {
+  // Run seed + all crons on first boot
+  seedDefaults().catch(console.error);
   runLifecycleCronJob();
+  runChannelDailyStatsCron();
+  runCohortAnalysisCron();
+  runCustomerSegmentCron();
+
+  // Lifecycle + segments every 6 hours
   setInterval(runLifecycleCronJob, LIFECYCLE_CRON_INTERVAL);
+  setInterval(runCustomerSegmentCron, LIFECYCLE_CRON_INTERVAL);
+
+  // Daily rollups every 24 hours
+  setInterval(runChannelDailyStatsCron, 24 * 60 * 60 * 1000);
+  setInterval(runCohortAnalysisCron, 24 * 60 * 60 * 1000);
 }, 60_000);
 
 // ---------------------------------------------------------------------------
