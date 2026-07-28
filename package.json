@@ -1,5 +1,5 @@
 {
-  "name": "seleric-tracker",
+  "name": "web-pixel-tracker",
   "private": true,
   "scripts": {
     "build": "react-router build",
