@@ -75,5 +75,6 @@
   "overrides": {
     "p-map": "^4.0.0"
   },
-  "author": "Administrator"
+  "author": "Parveen Jaiswal",
+  "license": "MIT"
 }

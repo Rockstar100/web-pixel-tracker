@@ -1,5 +1,6 @@
 import type { ActionFunctionArgs } from "@react-router/node";
 import { PrismaClient } from "@prisma/client";
+import { authenticate } from "../../shopify.server";
 import { EventNormalizer } from "../../services/normalizer";
 import { EventDeduplicator } from "../../services/deduplicator";
 import { UmamiForwarder } from "../../services/umami-forwarder";
@@ -19,15 +20,15 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 
   try {
-    const shop = request.headers.get("X-Shopify-Shop-Domain");
-    const topic = request.headers.get("X-Shopify-Topic");
+    // authenticate.webhook verifies the X-Shopify-Hmac-Sha256 signature
+    // and throws (401) if it's missing or invalid.
+    const { shop, payload: rawPayload } = await authenticate.webhook(request);
 
-    if (!shop || topic !== "orders/cancelled") {
+    if (!shop) {
       return Response.json({ error: "Invalid webhook" }, { status: 400 });
     }
 
-    const rawBody = await request.text();
-    const payload: ShopifyWebhookPayload = JSON.parse(rawBody);
+    const payload = rawPayload as ShopifyWebhookPayload;
 
     const shopConfig = await prisma.shopConfig.findUnique({
       where: { shopifyShop: shop },

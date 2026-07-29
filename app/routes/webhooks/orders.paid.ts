@@ -1,5 +1,6 @@
 import type { ActionFunctionArgs } from "@react-router/node";
 import { PrismaClient } from "@prisma/client";
+import { authenticate } from "../../shopify.server";
 import { EventNormalizer } from "../../services/normalizer";
 import { EventDeduplicator } from "../../services/deduplicator";
 import { UmamiForwarder } from "../../services/umami-forwarder";
@@ -20,23 +21,15 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 
   try {
-    // Verify webhook authenticity
-    const shop = request.headers.get("X-Shopify-Shop-Domain");
-    const hmac = request.headers.get("X-Shopify-Hmac-Sha256");
-    const topic = request.headers.get("X-Shopify-Topic");
+    // authenticate.webhook verifies the X-Shopify-Hmac-Sha256 signature
+    // and throws (401) if it's missing or invalid.
+    const { shop, payload: rawPayload } = await authenticate.webhook(request);
 
-    if (!shop || !hmac || topic !== "orders/paid") {
+    if (!shop) {
       return Response.json({ error: "Invalid webhook" }, { status: 400 });
     }
 
-    // Get raw body for HMAC verification
-    const rawBody = await request.text();
-    
-    // TODO: Verify HMAC in production
-    // const isValid = verifyWebhookHmac(rawBody, hmac, webhookSecret);
-    // if (!isValid) return json({ error: "Invalid signature" }, { status: 401 });
-
-    const payload: ShopifyWebhookPayload = JSON.parse(rawBody);
+    const payload = rawPayload as ShopifyWebhookPayload;
 
     // Get shop configuration
     const shopConfig = await prisma.shopConfig.findUnique({
