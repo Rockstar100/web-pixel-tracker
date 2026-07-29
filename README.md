@@ -126,6 +126,8 @@ POST /webhooks/customers.create
 
 **Note**: All payment tracking is handled through Shopify webhooks. Third-party payment provider webhooks (like Razorpay) are not used since we use Razorpay Magic Checkout which integrates directly with Shopify.
 
+**🔒 Security**: All webhook handlers use `authenticate.webhook()` from the Shopify app library, which verifies the `X-Shopify-Hmac-Sha256` signature against the app's webhook secret and rejects unsigned/forged requests before any data is processed.
+
 ---
 
 ## Payment Gateway Support
