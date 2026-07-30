@@ -5,7 +5,6 @@ E-commerce analytics and customer journey tracking for Shopify.
 Production-ready platform with order tracking, RFM segmentation, cohort analysis, multi-touch attribution, and GDPR/CCPA compliance.
 
 **✅ Razorpay Magic Checkout Support:** Fully supported via webhook-based tracking. See [documentation](DOCS_INDEX.md).
-
 ---
 
 ## Quick Start
